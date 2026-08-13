@@ -1,0 +1,8 @@
+CODE_SIGN_STYLE = Automatic
+INFOPLIST_FILE = Config/PhonePad-Info.plist
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks
+PRODUCT_BUNDLE_IDENTIFIER = com.anvilfilbert.PhonePad
+PRODUCT_MODULE_NAME = PhonePad
+PRODUCT_NAME = PhonePad
+SKIP_INSTALL = NO
+SUPPORTS_MACCATALYST = NO

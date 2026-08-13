@@ -1,0 +1,9 @@
+CODE_SIGN_STYLE = Automatic
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_KEY_CFBundleDisplayName = External Open Host
+INFOPLIST_KEY_UILaunchScreen_Generation = YES
+PRODUCT_BUNDLE_IDENTIFIER = com.anvilfilbert.PhonePad.ExternalOpenHost
+PRODUCT_MODULE_NAME = ExternalOpenHost
+PRODUCT_NAME = ExternalOpenHost
+SKIP_INSTALL = YES
+SUPPORTS_MACCATALYST = NO

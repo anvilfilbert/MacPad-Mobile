@@ -1,0 +1,657 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		C00000000000000000000001 /* PhonePadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000001 /* PhonePadApp.swift */; };
+		C00000000000000000000002 /* PhonePadRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* PhonePadRootView.swift */; };
+		C00000000000000000000003 /* PhonePadAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000003 /* PhonePadAppModel.swift */; };
+		C00000000000000000000004 /* PhonePadWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000004 /* PhonePadWorkflow.swift */; };
+		C00000000000000000000005 /* FileRecoveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000005 /* FileRecoveryStore.swift */; };
+		C00000000000000000000006 /* PhonePadTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000006 /* PhonePadTextEditor.swift */; };
+		C00000000000000000000007 /* PhonePadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000007 /* PhonePadState.swift */; };
+		C00000000000000000000008 /* RecoveryEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* RecoveryEnvelope.swift */; };
+		C00000000000000000000009 /* RecoveryStoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000009 /* RecoveryStoring.swift */; };
+		C0000000000000000000000A /* PhonePadWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000A /* PhonePadWorkflowTests.swift */; };
+		C0000000000000000000000B /* PhonePadTextEditorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000B /* PhonePadTextEditorTests.swift */; };
+		C0000000000000000000000C /* PhonePadLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000C /* PhonePadLaunchUITests.swift */; };
+		C0000000000000000000000D /* ExternalOpenHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000D /* ExternalOpenHostApp.swift */; };
+		C00000000000000000000020 /* PhonePadCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; };
+		C00000000000000000000021 /* PhonePadCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		C00000000000000000000022 /* PhonePadCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		110000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D00000000000000000000002;
+			remoteInfo = PhonePadCore;
+		};
+		110000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D00000000000000000000001;
+			remoteInfo = PhonePad;
+		};
+		110000000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D00000000000000000000002;
+			remoteInfo = PhonePadCore;
+		};
+		110000000000000000000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D00000000000000000000001;
+			remoteInfo = PhonePad;
+		};
+		110000000000000000000005 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D00000000000000000000005;
+			remoteInfo = ExternalOpenHost;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		E00000000000000000000004 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				C00000000000000000000021 /* PhonePadCore.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		B00000000000000000000001 /* PhonePadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadApp.swift; sourceTree = "<group>"; };
+		B00000000000000000000002 /* PhonePadRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRootView.swift; sourceTree = "<group>"; };
+		B00000000000000000000003 /* PhonePadAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadAppModel.swift; sourceTree = "<group>"; };
+		B00000000000000000000004 /* PhonePadWorkflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadWorkflow.swift; sourceTree = "<group>"; };
+		B00000000000000000000005 /* FileRecoveryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileRecoveryStore.swift; sourceTree = "<group>"; };
+		B00000000000000000000006 /* PhonePadTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadTextEditor.swift; sourceTree = "<group>"; };
+		B00000000000000000000007 /* PhonePadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadState.swift; sourceTree = "<group>"; };
+		B00000000000000000000008 /* RecoveryEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryEnvelope.swift; sourceTree = "<group>"; };
+		B00000000000000000000009 /* RecoveryStoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryStoring.swift; sourceTree = "<group>"; };
+		B0000000000000000000000A /* PhonePadWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadWorkflowTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000000B /* PhonePadTextEditorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadTextEditorTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000000C /* PhonePadLaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadLaunchUITests.swift; sourceTree = "<group>"; };
+		B0000000000000000000000D /* ExternalOpenHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalOpenHostApp.swift; sourceTree = "<group>"; };
+		B00000000000000000000020 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000021 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000022 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000023 /* PhonePad.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = PhonePad.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000024 /* PhonePadCore.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = PhonePadCore.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000025 /* PhonePadTests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = PhonePadTests.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000026 /* PhonePadUITests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = PhonePadUITests.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000027 /* ExternalOpenHost.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ExternalOpenHost.xcconfig; sourceTree = "<group>"; };
+		B00000000000000000000028 /* PhonePad-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "PhonePad-Info.plist"; sourceTree = "<group>"; };
+		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000044 /* PhonePadUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000045 /* ExternalOpenHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ExternalOpenHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		E00000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C00000000000000000000020 /* PhonePadCore.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000012 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000022 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C00000000000000000000022 /* PhonePadCore.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000032 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000042 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000006 /* PhonePad */,
+				A00000000000000000000007 /* PhonePadCore */,
+				A00000000000000000000008 /* PhonePadTests */,
+				A00000000000000000000009 /* PhonePadUITests */,
+				A0000000000000000000000A /* ExternalOpenHost */,
+				A00000000000000000000005 /* Config */,
+				A00000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A00000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000041 /* PhonePad.app */,
+				B00000000000000000000042 /* PhonePadCore.framework */,
+				B00000000000000000000043 /* PhonePadTests.xctest */,
+				B00000000000000000000044 /* PhonePadUITests.xctest */,
+				B00000000000000000000045 /* ExternalOpenHost.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000005 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000020 /* Base.xcconfig */,
+				B00000000000000000000021 /* Debug.xcconfig */,
+				B00000000000000000000022 /* Release.xcconfig */,
+				B00000000000000000000023 /* PhonePad.xcconfig */,
+				B00000000000000000000024 /* PhonePadCore.xcconfig */,
+				B00000000000000000000025 /* PhonePadTests.xcconfig */,
+				B00000000000000000000026 /* PhonePadUITests.xcconfig */,
+				B00000000000000000000027 /* ExternalOpenHost.xcconfig */,
+				B00000000000000000000028 /* PhonePad-Info.plist */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000006 /* PhonePad */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000001 /* PhonePadApp.swift */,
+				B00000000000000000000002 /* PhonePadRootView.swift */,
+				B00000000000000000000003 /* PhonePadAppModel.swift */,
+				B00000000000000000000004 /* PhonePadWorkflow.swift */,
+				B00000000000000000000005 /* FileRecoveryStore.swift */,
+				B00000000000000000000006 /* PhonePadTextEditor.swift */,
+			);
+			path = PhonePad;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000007 /* PhonePadCore */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000007 /* PhonePadState.swift */,
+				B00000000000000000000008 /* RecoveryEnvelope.swift */,
+				B00000000000000000000009 /* RecoveryStoring.swift */,
+			);
+			path = PhonePadCore;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000008 /* PhonePadTests */ = {
+			isa = PBXGroup;
+			children = (
+				B0000000000000000000000A /* PhonePadWorkflowTests.swift */,
+				B0000000000000000000000B /* PhonePadTextEditorTests.swift */,
+			);
+			path = PhonePadTests;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000009 /* PhonePadUITests */ = {
+			isa = PBXGroup;
+			children = (
+				B0000000000000000000000C /* PhonePadLaunchUITests.swift */,
+			);
+			path = PhonePadUITests;
+			sourceTree = "<group>";
+		};
+		A0000000000000000000000A /* ExternalOpenHost */ = {
+			isa = PBXGroup;
+			children = (
+				B0000000000000000000000D /* ExternalOpenHostApp.swift */,
+			);
+			path = ExternalOpenHost;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D00000000000000000000001 /* PhonePad */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 330000000000000000000011 /* Build configuration list for PBXNativeTarget "PhonePad" */;
+			buildPhases = (
+				E00000000000000000000001 /* Sources */,
+				E00000000000000000000002 /* Frameworks */,
+				E00000000000000000000003 /* Resources */,
+				E00000000000000000000004 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F00000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = PhonePad;
+			packageProductDependencies = (
+			);
+			productName = PhonePad;
+			productReference = B00000000000000000000041 /* PhonePad.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D00000000000000000000002 /* PhonePadCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 330000000000000000000021 /* Build configuration list for PBXNativeTarget "PhonePadCore" */;
+			buildPhases = (
+				E00000000000000000000011 /* Sources */,
+				E00000000000000000000012 /* Frameworks */,
+				E00000000000000000000013 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PhonePadCore;
+			packageProductDependencies = (
+			);
+			productName = PhonePadCore;
+			productReference = B00000000000000000000042 /* PhonePadCore.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		D00000000000000000000003 /* PhonePadTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 330000000000000000000031 /* Build configuration list for PBXNativeTarget "PhonePadTests" */;
+			buildPhases = (
+				E00000000000000000000021 /* Sources */,
+				E00000000000000000000022 /* Frameworks */,
+				E00000000000000000000023 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F00000000000000000000002 /* PBXTargetDependency */,
+				F00000000000000000000003 /* PBXTargetDependency */,
+			);
+			name = PhonePadTests;
+			packageProductDependencies = (
+			);
+			productName = PhonePadTests;
+			productReference = B00000000000000000000043 /* PhonePadTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		D00000000000000000000004 /* PhonePadUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 330000000000000000000041 /* Build configuration list for PBXNativeTarget "PhonePadUITests" */;
+			buildPhases = (
+				E00000000000000000000031 /* Sources */,
+				E00000000000000000000032 /* Frameworks */,
+				E00000000000000000000033 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F00000000000000000000004 /* PBXTargetDependency */,
+				F00000000000000000000005 /* PBXTargetDependency */,
+			);
+			name = PhonePadUITests;
+			packageProductDependencies = (
+			);
+			productName = PhonePadUITests;
+			productReference = B00000000000000000000044 /* PhonePadUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		D00000000000000000000005 /* ExternalOpenHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 330000000000000000000051 /* Build configuration list for PBXNativeTarget "ExternalOpenHost" */;
+			buildPhases = (
+				E00000000000000000000041 /* Sources */,
+				E00000000000000000000042 /* Frameworks */,
+				E00000000000000000000043 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ExternalOpenHost;
+			packageProductDependencies = (
+			);
+			productName = ExternalOpenHost;
+			productReference = B00000000000000000000045 /* ExternalOpenHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					D00000000000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					D00000000000000000000002 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					D00000000000000000000003 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = D00000000000000000000001;
+					};
+					D00000000000000000000004 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = D00000000000000000000001;
+					};
+					D00000000000000000000005 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 330000000000000000000001 /* Build configuration list for PBXProject "PhonePad" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A00000000000000000000002;
+			productRefGroup = A00000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D00000000000000000000002 /* PhonePadCore */,
+				D00000000000000000000001 /* PhonePad */,
+				D00000000000000000000003 /* PhonePadTests */,
+				D00000000000000000000004 /* PhonePadUITests */,
+				D00000000000000000000005 /* ExternalOpenHost */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E00000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000013 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000023 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000033 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000043 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		E00000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C00000000000000000000001 /* PhonePadApp.swift in Sources */,
+				C00000000000000000000002 /* PhonePadRootView.swift in Sources */,
+				C00000000000000000000003 /* PhonePadAppModel.swift in Sources */,
+				C00000000000000000000004 /* PhonePadWorkflow.swift in Sources */,
+				C00000000000000000000005 /* FileRecoveryStore.swift in Sources */,
+				C00000000000000000000006 /* PhonePadTextEditor.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000011 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C00000000000000000000007 /* PhonePadState.swift in Sources */,
+				C00000000000000000000008 /* RecoveryEnvelope.swift in Sources */,
+				C00000000000000000000009 /* RecoveryStoring.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0000000000000000000000A /* PhonePadWorkflowTests.swift in Sources */,
+				C0000000000000000000000B /* PhonePadTextEditorTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000031 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0000000000000000000000C /* PhonePadLaunchUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E00000000000000000000041 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0000000000000000000000D /* ExternalOpenHostApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		F00000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D00000000000000000000002 /* PhonePadCore */;
+			targetProxy = 110000000000000000000001 /* PBXContainerItemProxy */;
+		};
+		F00000000000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D00000000000000000000001 /* PhonePad */;
+			targetProxy = 110000000000000000000002 /* PBXContainerItemProxy */;
+		};
+		F00000000000000000000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D00000000000000000000002 /* PhonePadCore */;
+			targetProxy = 110000000000000000000003 /* PBXContainerItemProxy */;
+		};
+		F00000000000000000000004 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D00000000000000000000001 /* PhonePad */;
+			targetProxy = 110000000000000000000004 /* PBXContainerItemProxy */;
+		};
+		F00000000000000000000005 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D00000000000000000000005 /* ExternalOpenHost */;
+			targetProxy = 110000000000000000000005 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		220000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000021 /* Debug.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		220000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000022 /* Release.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		220000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000023 /* PhonePad.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		220000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000023 /* PhonePad.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		220000000000000000000021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000024 /* PhonePadCore.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		220000000000000000000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000024 /* PhonePadCore.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		220000000000000000000031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000025 /* PhonePadTests.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		220000000000000000000032 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000025 /* PhonePadTests.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		220000000000000000000041 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000026 /* PhonePadUITests.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		220000000000000000000042 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000026 /* PhonePadUITests.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		220000000000000000000051 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000027 /* ExternalOpenHost.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		220000000000000000000052 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = B00000000000000000000027 /* ExternalOpenHost.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		330000000000000000000001 /* Build configuration list for PBXProject "PhonePad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000001 /* Debug */,
+				220000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		330000000000000000000011 /* Build configuration list for PBXNativeTarget "PhonePad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000011 /* Debug */,
+				220000000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		330000000000000000000021 /* Build configuration list for PBXNativeTarget "PhonePadCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000021 /* Debug */,
+				220000000000000000000022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		330000000000000000000031 /* Build configuration list for PBXNativeTarget "PhonePadTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000031 /* Debug */,
+				220000000000000000000032 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		330000000000000000000041 /* Build configuration list for PBXNativeTarget "PhonePadUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000041 /* Debug */,
+				220000000000000000000042 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		330000000000000000000051 /* Build configuration list for PBXNativeTarget "ExternalOpenHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				220000000000000000000051 /* Debug */,
+				220000000000000000000052 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000001 /* Project object */;
+}
