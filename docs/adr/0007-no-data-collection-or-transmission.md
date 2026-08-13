@@ -1,0 +1,3 @@
+# No data collection or transmission
+
+PhonePad has no account, advertising, analytics, telemetry, or third-party crash-reporting SDK and does not collect or independently transmit User Content or usage data. An explicit user action may hand User Content to an Apple system service for Files access, Copy or Cut through the system pasteboard and optional Universal Clipboard, or printing; those system services then operate under the user's settings and their own terms. PhonePad never monitors the pasteboard in the background. TestFlight and App Store privacy declarations must reflect this boundary.

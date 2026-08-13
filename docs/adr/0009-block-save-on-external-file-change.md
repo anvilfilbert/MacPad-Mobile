@@ -1,0 +1,3 @@
+# Block save on an external File change
+
+PhonePad blocks Save when a File Conflict is detected through changed content, changed stable provider identity, an ambiguous move without stable identity, or an unresolved provider conflict version. A provider-reported move retaining stable identity updates only the locator. PhonePad offers Discard Edits and Reload Current, Save As, or Cancel; Reload terminates recovery before replacing editor text but does not resolve provider versions. PhonePad never knowingly overwrites a detected conflict, resolves provider versions, or attempts automatic text merging. Coordination and post-write verification reduce races but cannot guarantee against uncoordinated writers or remote provider commits.

@@ -1,0 +1,3 @@
+# Manual document recovery without session restore
+
+PhonePad starts each launch without reconstructing prior Tabs. To prevent silent data loss when iOS terminates the app, PhonePad locally preserves both never-saved Documents and unsaved edits to existing Files, then exposes them only through explicit Document Recovery; this keeps launch behavior fresh while allowing users to recover work deliberately. Preserved work never expires automatically and is removed only after the user saves or explicitly discards it. A recovered edit to an existing File remains subject to File Conflict detection before Save.
