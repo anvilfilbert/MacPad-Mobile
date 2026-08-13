@@ -30,7 +30,16 @@ struct PhonePadTextEditor: UIViewRepresentable {
     func updateUIView(_ textView: UITextView, context: Context) {
         context.coordinator.update(text: $text)
 
-        guard textView.markedTextRange == nil, textView.text != text else {
+        if textView.markedTextRange != nil {
+            context.coordinator.deferModelText(text, displayedText: textView.text ?? "")
+            return
+        }
+
+        if context.coordinator.reconcileCommittedComposition(in: textView) {
+            return
+        }
+
+        guard textView.text != text else {
             return
         }
 
@@ -52,6 +61,8 @@ struct PhonePadTextEditor: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         private var text: Binding<String>
+        private var deferredModelText: String?
+        private var compositionIsActive = false
 
         init(text: Binding<String>) {
             self.text = text
@@ -61,7 +72,52 @@ struct PhonePadTextEditor: UIViewRepresentable {
             self.text = text
         }
 
+        func deferModelText(_ modelText: String, displayedText: String) {
+            compositionIsActive = true
+            guard modelText != displayedText else {
+                return
+            }
+            deferredModelText = modelText
+        }
+
+        @discardableResult
+        func reconcileCommittedComposition(in textView: UITextView) -> Bool {
+            guard compositionIsActive, textView.markedTextRange == nil else {
+                return false
+            }
+
+            compositionIsActive = false
+            let hadDeferredModelText = deferredModelText != nil
+            deferredModelText = nil
+
+            guard hadDeferredModelText else {
+                return false
+            }
+
+            synchronizeBinding(with: textView)
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
+            if textView.markedTextRange != nil {
+                compositionIsActive = true
+            } else if reconcileCommittedComposition(in: textView) {
+                return
+            }
+
+            synchronizeBinding(with: textView)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            if textView.markedTextRange != nil {
+                compositionIsActive = true
+                return
+            }
+
+            _ = reconcileCommittedComposition(in: textView)
+        }
+
+        private func synchronizeBinding(with textView: UITextView) {
             let updatedText = textView.text ?? ""
             guard text.wrappedValue != updatedText else {
                 return

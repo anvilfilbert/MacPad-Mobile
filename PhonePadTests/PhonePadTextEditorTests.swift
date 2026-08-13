@@ -72,6 +72,8 @@ final class PhonePadTextEditorTests: XCTestCase {
         defer { destroy(fixture) }
 
         fixture.textView.selectedRange = NSRange(location: 2, length: 0)
+        let undoManager = try XCTUnwrap(fixture.textView.undoManager)
+        undoManager.removeAllActions()
         fixture.textView.setMarkedText(
             "に",
             selectedRange: NSRange(location: 1, length: 0)
@@ -92,6 +94,28 @@ final class PhonePadTextEditorTests: XCTestCase {
         let markedAfterUpdate = try XCTUnwrap(currentTextView.markedTextRange)
         XCTAssertEqual(textRange(markedAfterUpdate, in: currentTextView), markedRangeBeforeUpdate)
         XCTAssertEqual(currentTextView.selectedRange, selectionBeforeUpdate)
+
+        currentTextView.unmarkText()
+        render(fixture.controller)
+
+        XCTAssertNil(currentTextView.markedTextRange)
+        XCTAssertEqual(currentTextView.text, displayedComposition)
+        XCTAssertEqual(fixture.model.text, displayedComposition)
+        XCTAssertEqual(currentTextView.selectedRange, selectionBeforeUpdate)
+        XCTAssertTrue(undoManager.canUndo)
+
+        undoManager.undo()
+        render(fixture.controller)
+
+        XCTAssertEqual(currentTextView.text, "ab")
+        XCTAssertEqual(fixture.model.text, "ab")
+        XCTAssertTrue(undoManager.canRedo)
+
+        undoManager.redo()
+        render(fixture.controller)
+
+        XCTAssertEqual(currentTextView.text, displayedComposition)
+        XCTAssertEqual(fixture.model.text, displayedComposition)
     }
 
     @MainActor

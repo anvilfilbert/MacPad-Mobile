@@ -22,6 +22,8 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
     case couldNotPromoteCheckpoint(DocumentID, URL, String)
     case postPromotionValidationFailed(DocumentID, String)
     case rollbackFailed(DocumentID, String)
+    case couldNotCommitCheckpoint(DocumentID, URL, String)
+    case couldNotRemoveRecoveryArtifact(DocumentID, URL, String)
     case couldNotRemovePreviousGenerationBackup(DocumentID, URL, String)
 
     public var errorDescription: String? {
@@ -84,6 +86,10 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
             "New recovery data for document \(documentID.rawValue) failed final verification. The previous verified generation was restored."
         case let .rollbackFailed(documentID, _):
             "Recovery rollback for document \(documentID.rawValue) needs attention. Do not discard recovery data; retry Recovery."
+        case let .couldNotCommitCheckpoint(documentID, _, _):
+            "New recovery data for document \(documentID.rawValue) is verified, but its transaction could not be committed. The previous verified generation remains available."
+        case let .couldNotRemoveRecoveryArtifact(documentID, _, _):
+            "Could not remove rejected recovery data for document \(documentID.rawValue). Do not discard recovery data; retry Recovery."
         case let .couldNotRemovePreviousGenerationBackup(documentID, _, _):
             "New recovery data for document \(documentID.rawValue) is verified, but protected cleanup remains. Retry Recovery."
         }
@@ -116,60 +122,57 @@ public actor FileRecoveryStore: RecoveryStoring {
     public func save(envelope: RecoveryEnvelope) async throws {
         try prepareRecoveryDirectory()
 
+        let paths = transactionPaths(documentID: envelope.documentID)
+        try reconcile(documentID: envelope.documentID, paths: paths)
+
         let encodedEnvelope = try encode(envelope: envelope)
-        let canonicalURL = checkpointURL(documentID: envelope.documentID)
-        let stagingURL = temporaryURL(kind: "staging", documentID: envelope.documentID)
-        let backupURL = temporaryURL(kind: "previous", documentID: envelope.documentID)
-        let failedURL = temporaryURL(kind: "failed", documentID: envelope.documentID)
-
-        try writeStagedEnvelope(
-            data: encodedEnvelope,
-            envelope: envelope,
-            stagingURL: stagingURL
-        )
-
-        let previousGeneration = try preservePreviousGeneration(
-            documentID: envelope.documentID,
-            canonicalURL: canonicalURL,
-            backupURL: backupURL
-        )
-
         do {
-            try promote(
-                documentID: envelope.documentID,
-                stagingURL: stagingURL,
-                canonicalURL: canonicalURL,
-                hasPreviousGeneration: previousGeneration != nil
+            try writeProtectedEnvelope(
+                data: encodedEnvelope,
+                envelope: envelope,
+                url: paths.staging
             )
         } catch {
-            try restorePreviousGeneration(
+            try removeRejectedArtifact(
                 documentID: envelope.documentID,
-                canonicalURL: canonicalURL,
-                backupURL: previousGeneration == nil ? nil : backupURL,
-                failedURL: failedURL,
-                previousGeneration: previousGeneration,
+                url: paths.staging,
                 originalFailure: error
             )
             throw error
         }
 
+        let previousGeneration = try preservePreviousGeneration(
+            documentID: envelope.documentID,
+            canonicalURL: paths.canonical,
+            backupURL: paths.previous
+        )
+
         do {
+            try writeProtectedEnvelope(
+                data: encodedEnvelope,
+                envelope: envelope,
+                url: paths.transaction
+            )
+            try promote(
+                documentID: envelope.documentID,
+                stagingURL: paths.staging,
+                canonicalURL: paths.canonical,
+                hasPreviousGeneration: previousGeneration != nil
+            )
             try applyProtectedMetadata(
-                url: canonicalURL,
+                url: paths.canonical,
                 documentID: envelope.documentID
             )
             try verifyStoredEnvelope(
-                url: canonicalURL,
+                url: paths.canonical,
                 expectedEnvelope: envelope,
                 expectedData: encodedEnvelope
             )
-            try postPromotionValidation(canonicalURL)
+            try postPromotionValidation(paths.canonical)
         } catch {
             try restorePreviousGeneration(
                 documentID: envelope.documentID,
-                canonicalURL: canonicalURL,
-                backupURL: previousGeneration == nil ? nil : backupURL,
-                failedURL: failedURL,
+                paths: paths,
                 previousGeneration: previousGeneration,
                 originalFailure: error
             )
@@ -182,32 +185,50 @@ public actor FileRecoveryStore: RecoveryStoring {
             )
         }
 
+        do {
+            try removeArtifactIfPresent(
+                documentID: envelope.documentID,
+                url: paths.transaction
+            )
+        } catch {
+            throw FileRecoveryStoreError.couldNotCommitCheckpoint(
+                envelope.documentID,
+                paths.transaction,
+                String(describing: error)
+            )
+        }
+
         guard previousGeneration != nil else {
             return
         }
         do {
-            try fileManager.removeItem(at: backupURL)
+            try removeArtifactIfPresent(
+                documentID: envelope.documentID,
+                url: paths.previous
+            )
         } catch {
             throw FileRecoveryStoreError.couldNotRemovePreviousGenerationBackup(
                 envelope.documentID,
-                backupURL,
+                paths.previous,
                 String(describing: error)
             )
         }
     }
 
     public func load(documentID: DocumentID) async throws -> RecoveryEnvelope? {
-        let canonicalURL = checkpointURL(documentID: documentID)
-        guard fileManager.fileExists(atPath: canonicalURL.path) else {
+        try prepareRecoveryDirectory()
+        let paths = transactionPaths(documentID: documentID)
+        try reconcile(documentID: documentID, paths: paths)
+        guard fileManager.fileExists(atPath: paths.canonical.path) else {
             return nil
         }
 
         let (data, envelope) = try readEnvelope(
             documentID: documentID,
-            url: canonicalURL
+            url: paths.canonical
         )
         try verifyStoredEnvelope(
-            url: canonicalURL,
+            url: paths.canonical,
             expectedEnvelope: envelope,
             expectedData: data
         )
@@ -217,11 +238,13 @@ public actor FileRecoveryStore: RecoveryStoring {
     public func verifyCheckpoint(
         documentID: DocumentID
     ) async throws -> RecoveryCheckpointVerification {
-        let canonicalURL = checkpointURL(documentID: documentID)
-        guard fileManager.fileExists(atPath: canonicalURL.path) else {
-            throw FileRecoveryStoreError.checkpointNotFound(documentID, canonicalURL)
+        try prepareRecoveryDirectory()
+        let paths = transactionPaths(documentID: documentID)
+        try reconcile(documentID: documentID, paths: paths)
+        guard fileManager.fileExists(atPath: paths.canonical.path) else {
+            throw FileRecoveryStoreError.checkpointNotFound(documentID, paths.canonical)
         }
-        return try readVerification(url: canonicalURL, documentID: documentID)
+        return try readVerification(url: paths.canonical, documentID: documentID)
     }
 
     private func prepareRecoveryDirectory() throws {
@@ -260,26 +283,26 @@ public actor FileRecoveryStore: RecoveryStoring {
         }
     }
 
-    private func writeStagedEnvelope(
+    private func writeProtectedEnvelope(
         data: Data,
         envelope: RecoveryEnvelope,
-        stagingURL: URL
+        url: URL
     ) throws {
         do {
             try data.write(
-                to: stagingURL,
+                to: url,
                 options: [.atomic, .completeFileProtection]
             )
         } catch {
             throw FileRecoveryStoreError.couldNotWriteCheckpoint(
                 envelope.documentID,
-                stagingURL,
+                url,
                 String(describing: error)
             )
         }
-        try applyProtectedMetadata(url: stagingURL, documentID: envelope.documentID)
+        try applyProtectedMetadata(url: url, documentID: envelope.documentID)
         try verifyStoredEnvelope(
-            url: stagingURL,
+            url: url,
             expectedEnvelope: envelope,
             expectedData: data
         )
@@ -305,18 +328,32 @@ public actor FileRecoveryStore: RecoveryStoring {
         do {
             try fileManager.copyItem(at: canonicalURL, to: backupURL)
         } catch {
+            try removeRejectedArtifact(
+                documentID: documentID,
+                url: backupURL,
+                originalFailure: error
+            )
             throw FileRecoveryStoreError.couldNotCreatePreviousGenerationBackup(
                 documentID,
                 backupURL,
                 String(describing: error)
             )
         }
-        try applyProtectedMetadata(url: backupURL, documentID: documentID)
-        try verifyStoredEnvelope(
-            url: backupURL,
-            expectedEnvelope: previousGeneration.envelope,
-            expectedData: previousGeneration.data
-        )
+        do {
+            try applyProtectedMetadata(url: backupURL, documentID: documentID)
+            try verifyStoredEnvelope(
+                url: backupURL,
+                expectedEnvelope: previousGeneration.envelope,
+                expectedData: previousGeneration.data
+            )
+        } catch {
+            try removeRejectedArtifact(
+                documentID: documentID,
+                url: backupURL,
+                originalFailure: error
+            )
+            throw error
+        }
         return previousGeneration
     }
 
@@ -348,29 +385,149 @@ public actor FileRecoveryStore: RecoveryStoring {
 
     private func restorePreviousGeneration(
         documentID: DocumentID,
-        canonicalURL: URL,
-        backupURL: URL?,
-        failedURL: URL,
+        paths: RecoveryTransactionPaths,
         previousGeneration: (data: Data, envelope: RecoveryEnvelope)?,
         originalFailure: Error
     ) throws {
         do {
-            if fileManager.fileExists(atPath: canonicalURL.path) {
-                try fileManager.moveItem(at: canonicalURL, to: failedURL)
-            }
-            if let backupURL, let previousGeneration {
-                try fileManager.moveItem(at: backupURL, to: canonicalURL)
-                try applyProtectedMetadata(url: canonicalURL, documentID: documentID)
+            if let previousGeneration {
                 try verifyStoredEnvelope(
-                    url: canonicalURL,
+                    url: paths.previous,
                     expectedEnvelope: previousGeneration.envelope,
                     expectedData: previousGeneration.data
                 )
+                try removeArtifactIfPresent(
+                    documentID: documentID,
+                    url: paths.canonical
+                )
+                try fileManager.copyItem(at: paths.previous, to: paths.canonical)
+                try applyProtectedMetadata(url: paths.canonical, documentID: documentID)
+                try verifyStoredEnvelope(
+                    url: paths.canonical,
+                    expectedEnvelope: previousGeneration.envelope,
+                    expectedData: previousGeneration.data
+                )
+            } else {
+                try removeArtifactIfPresent(
+                    documentID: documentID,
+                    url: paths.canonical
+                )
             }
+            try removeArtifactIfPresent(documentID: documentID, url: paths.staging)
+            try removeArtifactIfPresent(documentID: documentID, url: paths.transaction)
+            try removeArtifactIfPresent(documentID: documentID, url: paths.previous)
         } catch {
             throw FileRecoveryStoreError.rollbackFailed(
                 documentID,
                 "Original failure: \(String(describing: originalFailure)); rollback failure: \(String(describing: error))"
+            )
+        }
+    }
+
+    private func reconcile(
+        documentID: DocumentID,
+        paths: RecoveryTransactionPaths
+    ) throws {
+        let hasTransaction = fileManager.fileExists(atPath: paths.transaction.path)
+        let hasPrevious = fileManager.fileExists(atPath: paths.previous.path)
+        let hasCanonical = fileManager.fileExists(atPath: paths.canonical.path)
+
+        if hasTransaction {
+            if hasPrevious {
+                let previousGeneration = try readVerifiedEnvelope(
+                    documentID: documentID,
+                    url: paths.previous
+                )
+                try restorePreviousGeneration(
+                    documentID: documentID,
+                    paths: paths,
+                    previousGeneration: previousGeneration,
+                    originalFailure: FileRecoveryInterruption.interruptedTransaction
+                )
+            } else {
+                try restorePreviousGeneration(
+                    documentID: documentID,
+                    paths: paths,
+                    previousGeneration: nil,
+                    originalFailure: FileRecoveryInterruption.interruptedFirstGeneration
+                )
+            }
+            return
+        }
+
+        if hasCanonical {
+            do {
+                _ = try readVerifiedEnvelope(
+                    documentID: documentID,
+                    url: paths.canonical
+                )
+            } catch {
+                throw error
+            }
+            try removeArtifactIfPresent(documentID: documentID, url: paths.staging)
+            try removeArtifactIfPresent(documentID: documentID, url: paths.previous)
+            return
+        }
+
+        if hasPrevious {
+            let previousGeneration = try readVerifiedEnvelope(
+                documentID: documentID,
+                url: paths.previous
+            )
+            try restorePreviousGeneration(
+                documentID: documentID,
+                paths: paths,
+                previousGeneration: previousGeneration,
+                originalFailure: FileRecoveryInterruption.missingCanonical
+            )
+            return
+        }
+
+        try removeArtifactIfPresent(documentID: documentID, url: paths.staging)
+    }
+
+    private func readVerifiedEnvelope(
+        documentID: DocumentID,
+        url: URL
+    ) throws -> (data: Data, envelope: RecoveryEnvelope) {
+        let storedEnvelope = try readEnvelope(documentID: documentID, url: url)
+        try verifyStoredEnvelope(
+            url: url,
+            expectedEnvelope: storedEnvelope.envelope,
+            expectedData: storedEnvelope.data
+        )
+        return storedEnvelope
+    }
+
+    private func removeRejectedArtifact(
+        documentID: DocumentID,
+        url: URL,
+        originalFailure: Error
+    ) throws {
+        do {
+            try removeArtifactIfPresent(documentID: documentID, url: url)
+        } catch {
+            throw FileRecoveryStoreError.rollbackFailed(
+                documentID,
+                "Original failure: \(String(describing: originalFailure)); cleanup failure: \(String(describing: error))"
+            )
+        }
+    }
+
+    private func removeArtifactIfPresent(
+        documentID: DocumentID,
+        url: URL
+    ) throws {
+        guard fileManager.fileExists(atPath: url.path) else {
+            return
+        }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            throw FileRecoveryStoreError.couldNotRemoveRecoveryArtifact(
+                documentID,
+                url,
+                String(describing: error)
             )
         }
     }
@@ -526,10 +683,37 @@ public actor FileRecoveryStore: RecoveryStoring {
         return rootURL.appendingPathComponent(filename, isDirectory: false)
     }
 
-    private func temporaryURL(kind: String, documentID: DocumentID) -> URL {
-        let filename = ".\(documentID.rawValue.uuidString.lowercased()).\(kind).\(UUID().uuidString.lowercased())"
-        return rootURL.appendingPathComponent(filename, isDirectory: false)
+    private func transactionPaths(documentID: DocumentID) -> RecoveryTransactionPaths {
+        let identifier = documentID.rawValue.uuidString.lowercased()
+        return RecoveryTransactionPaths(
+            canonical: checkpointURL(documentID: documentID),
+            staging: rootURL.appendingPathComponent(
+                ".\(identifier).recovery.staging",
+                isDirectory: false
+            ),
+            transaction: rootURL.appendingPathComponent(
+                ".\(identifier).recovery.transaction",
+                isDirectory: false
+            ),
+            previous: rootURL.appendingPathComponent(
+                ".\(identifier).recovery.previous",
+                isDirectory: false
+            )
+        )
     }
+}
+
+private struct RecoveryTransactionPaths {
+    let canonical: URL
+    let staging: URL
+    let transaction: URL
+    let previous: URL
+}
+
+private enum FileRecoveryInterruption: Error {
+    case interruptedTransaction
+    case interruptedFirstGeneration
+    case missingCanonical
 }
 
 private func recoveryMessage(documentID: DocumentID?, message: String) -> String {
