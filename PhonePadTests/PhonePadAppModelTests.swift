@@ -555,6 +555,118 @@ final class PhonePadAppModelTests: XCTestCase {
         )
     }
 
+    func testOpenDuplicateEditAndExplicitSaveNeverAutosaveOriginal() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let sourceRootURL = try makeModelRecoveryRoot()
+        let sourceURL = sourceRootURL.appendingPathComponent(
+            "Manual Open.txt",
+            isDirectory: false
+        )
+        let originalBytes = Data("Original\n".utf8)
+        try originalBytes.write(to: sourceURL, options: .withoutOverwriting)
+        let store = FileRecoveryStore(
+            rootURL: recoveryRootURL,
+            fileManager: .default
+        )
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .milliseconds(20),
+            checkpointMaximumInterval: .milliseconds(100)
+        )
+
+        let firstOpen = await model.openDocument(selectedURL: sourceURL)
+        let duplicateOpen = await model.openDocument(selectedURL: sourceURL)
+
+        XCTAssertTrue(firstOpen)
+        XCTAssertTrue(duplicateOpen)
+        XCTAssertEqual(model.state.tabs.count, 1)
+        XCTAssertEqual(model.activeText, "Original\n")
+        XCTAssertNotNil(model.state.activeTab.document.fileBinding)
+
+        model.editActiveDocument(text: "PhonePad edit\n")
+        try await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertEqual(try Data(contentsOf: sourceURL), originalBytes)
+        XCTAssertTrue(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            model.state.activeTab.document.recoveryState,
+            .protectedUnsaved
+        )
+        let loadedProtectedEnvelope = try await store.load(
+            documentID: model.state.activeTab.document.id
+        )
+        let protectedEnvelope = try XCTUnwrap(loadedProtectedEnvelope)
+        XCTAssertNotNil(protectedEnvelope.fileReference)
+        XCTAssertNil(protectedEnvelope.pendingSave)
+
+        let didSave = await model.saveActiveDocument()
+
+        XCTAssertTrue(didSave)
+        XCTAssertEqual(try Data(contentsOf: sourceURL), Data("PhonePad edit\n".utf8))
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(model.state.activeTab.document.recoveryState, .clean)
+        XCTAssertNil(model.fileSaveError)
+        let removedRecovery = try await store.load(
+            documentID: model.state.activeTab.document.id
+        )
+        XCTAssertNil(removedRecovery)
+    }
+
+    func testBoundSaveConflictKeepsExternalBytesAndProtectedRecovery() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let sourceRootURL = try makeModelRecoveryRoot()
+        let sourceURL = sourceRootURL.appendingPathComponent(
+            "Conflict.txt",
+            isDirectory: false
+        )
+        try Data("Original\n".utf8).write(
+            to: sourceURL,
+            options: .withoutOverwriting
+        )
+        let store = FileRecoveryStore(
+            rootURL: recoveryRootURL,
+            fileManager: .default
+        )
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        let didOpen = await model.openDocument(selectedURL: sourceURL)
+        XCTAssertTrue(didOpen)
+        model.editActiveDocument(text: "Unsaved PhonePad text\n")
+        let externalBytes = Data("External text\n".utf8)
+        try externalBytes.write(to: sourceURL, options: .atomic)
+
+        let didSave = await model.saveActiveDocument()
+
+        XCTAssertFalse(didSave)
+        XCTAssertEqual(try Data(contentsOf: sourceURL), externalBytes)
+        XCTAssertEqual(model.activeText, "Unsaved PhonePad text\n")
+        XCTAssertTrue(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            model.state.activeTab.document.recoveryState,
+            .protectedUnsaved
+        )
+        XCTAssertNotNil(model.fileSaveError)
+        let loadedRecovery = try await store.load(
+            documentID: model.state.activeTab.document.id
+        )
+        let recovery = try XCTUnwrap(loadedRecovery)
+        XCTAssertEqual(recovery.text, "Unsaved PhonePad text\n")
+        XCTAssertNotNil(recovery.pendingSave)
+    }
+
     private func makeModelRecoveryRoot() throws -> URL {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

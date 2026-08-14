@@ -183,6 +183,33 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testOpenActionPresentsNativeFilePickerWithoutChangingDocument() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        let protectedText = "Keep this text while choosing a File"
+        editor.typeText(protectedText)
+        XCTAssertEqual(editor.value as? String, protectedText)
+
+        let actionMenu = app.descendants(matching: .any)["phonepad.action-menu"].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.tap()
+        let openButton = app.buttons["phonepad.action-menu.open"]
+        XCTAssertTrue(openButton.waitForExistence(timeout: 2))
+        openButton.tap()
+
+        let picker = app.descendants(matching: .any)["phonepad.open.picker"].firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertEqual(editor.value as? String, protectedText)
+    }
+
+    @MainActor
     private func waitForCount(
         _ query: XCUIElementQuery,
         count: Int,

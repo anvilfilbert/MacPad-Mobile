@@ -20,6 +20,38 @@ private enum PhonePadSaveAsPresentationError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadFileAction {
+    case open
+    case save
+
+    var errorIdentifier: String {
+        switch self {
+        case .open:
+            return "phonepad.open.error"
+        case .save:
+            return "phonepad.save.error"
+        }
+    }
+
+    var progressIdentifier: String {
+        switch self {
+        case .open:
+            return "phonepad.open.progress"
+        case .save:
+            return "phonepad.save.progress"
+        }
+    }
+
+    var progressLabel: String {
+        switch self {
+        case .open:
+            return "Opening File"
+        case .save:
+            return "Saving File"
+        }
+    }
+}
+
 struct PhonePadRootView: View {
     @ObservedObject private var model: PhonePadAppModel
     @State private var editorTransitionController: PhonePadEditorTransitionController
@@ -31,6 +63,8 @@ struct PhonePadRootView: View {
     @State private var preparedNewFileSave: PreparedNewFileSave?
     @State private var folderPickerIsPresented: Bool
     @State private var saveAsValidationError: String?
+    @State private var filePickerIsPresented: Bool
+    @State private var fileAction: PhonePadFileAction?
 
     init(model: PhonePadAppModel) {
         self.model = model
@@ -43,6 +77,8 @@ struct PhonePadRootView: View {
         preparedNewFileSave = nil
         folderPickerIsPresented = false
         saveAsValidationError = nil
+        filePickerIsPresented = false
+        fileAction = nil
     }
 
     var body: some View {
@@ -89,6 +125,13 @@ struct PhonePadRootView: View {
         .sheet(isPresented: $saveAsIsPresented) {
             saveAsSheet
         }
+        .sheet(isPresented: $filePickerIsPresented) {
+            PhonePadFilePicker(
+                onSelection: selectOpenFile,
+                onCancellation: cancelFilePicker,
+                onFailure: failFilePicker
+            )
+        }
         .task {
             await model.refreshRecoveryItems()
         }
@@ -97,7 +140,14 @@ struct PhonePadRootView: View {
     private var actionMenu: some View {
         Menu {
             Button {
-                presentSaveAs()
+                presentOpenFilePicker()
+            } label: {
+                Label("Open", systemImage: "folder")
+            }
+            .accessibilityIdentifier("phonepad.action-menu.open")
+
+            Button {
+                saveActiveDocument()
             } label: {
                 Label("Save", systemImage: "square.and.arrow.down")
             }
@@ -225,7 +275,14 @@ struct PhonePadRootView: View {
 
     @ViewBuilder
     private var fileSaveFeedback: some View {
-        if !saveAsIsPresented, model.fileSaveCleanupRequired,
+        if !saveAsIsPresented, model.fileSaveInProgress,
+           let fileAction {
+            ProgressView(fileAction.progressLabel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(.regularMaterial)
+                .accessibilityIdentifier(fileAction.progressIdentifier)
+        } else if !saveAsIsPresented, model.fileSaveCleanupRequired,
            let fileSaveError = model.fileSaveError {
             cleanupRequiredFeedbackBanner(message: fileSaveError)
         } else if !saveAsIsPresented,
@@ -233,7 +290,7 @@ struct PhonePadRootView: View {
             fileSaveFeedbackBanner(
                 message: fileSaveError,
                 color: .red,
-                messageIdentifier: "phonepad.save.error"
+                messageIdentifier: fileAction?.errorIdentifier ?? "phonepad.save.error"
             )
         } else if let fileSaveNotice = model.fileSaveNotice {
             fileSaveFeedbackBanner(
@@ -274,7 +331,7 @@ struct PhonePadRootView: View {
                 .accessibilityIdentifier(messageIdentifier)
 
             Button {
-                model.clearFileSaveFeedback()
+                dismissFileSaveFeedback()
             } label: {
                 Image(systemName: "xmark")
                     .frame(width: 44, height: 44)
@@ -287,8 +344,9 @@ struct PhonePadRootView: View {
         .background(color)
     }
 
-    private func presentSaveAs() {
+    private func saveActiveDocument() {
         model.clearFileSaveFeedback()
+        fileAction = .save
         do {
             try editorTransitionController.commitMarkedText()
         } catch {
@@ -296,6 +354,20 @@ struct PhonePadRootView: View {
             return
         }
 
+        guard model.state.activeTab.document.fileBinding != nil else {
+            presentSaveAsAfterEditorCommit()
+            return
+        }
+
+        Task { @MainActor in
+            let saved = await model.saveActiveDocument()
+            if saved, model.fileSaveNotice == nil {
+                fileAction = nil
+            }
+        }
+    }
+
+    private func presentSaveAsAfterEditorCommit() {
         saveAsFileName = suggestedFileName()
         saveAsEncoding = .utf8
         preparedNewFileSave = nil
@@ -360,6 +432,7 @@ struct PhonePadRootView: View {
 
     private func cancelSaveAs() {
         model.clearFileSaveFeedback()
+        fileAction = nil
         preparedNewFileSave = nil
         saveAsValidationError = nil
         folderPickerIsPresented = false
@@ -382,6 +455,45 @@ struct PhonePadRootView: View {
         Task { @MainActor in
             _ = await model.retryFileSaveCleanup()
         }
+    }
+
+    private func presentOpenFilePicker() {
+        model.clearFileSaveFeedback()
+        fileAction = .open
+        do {
+            try editorTransitionController.commitMarkedText()
+        } catch {
+            model.reportFileSaveTransitionError(error)
+            return
+        }
+        filePickerIsPresented = true
+    }
+
+    private func selectOpenFile(_ selectedURL: URL) {
+        filePickerIsPresented = false
+        fileAction = .open
+        Task { @MainActor in
+            let opened = await model.openDocument(selectedURL: selectedURL)
+            if opened, model.fileSaveNotice == nil {
+                fileAction = nil
+            }
+        }
+    }
+
+    private func cancelFilePicker() {
+        filePickerIsPresented = false
+        fileAction = nil
+    }
+
+    private func failFilePicker(_ error: Error) {
+        filePickerIsPresented = false
+        fileAction = .open
+        model.reportFileSaveTransitionError(error)
+    }
+
+    private func dismissFileSaveFeedback() {
+        model.clearFileSaveFeedback()
+        fileAction = nil
     }
 
     private var recoverySheet: some View {

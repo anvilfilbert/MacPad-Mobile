@@ -3,11 +3,21 @@ import Foundation
 
 public let maximumSupportedTextFileByteCount: Int = 25 * 1024 * 1024
 
-public enum TextFileEncoding: String, Equatable, Hashable, Sendable {
+public struct FileIdentity: Codable, Equatable, Hashable, Sendable {
+    public let volumeUUID: UUID
+    public let documentIdentifier: Int
+
+    public init(volumeUUID: UUID, documentIdentifier: Int) {
+        self.volumeUUID = volumeUUID
+        self.documentIdentifier = documentIdentifier
+    }
+}
+
+public enum TextFileEncoding: String, Codable, Equatable, Hashable, Sendable {
     case utf8
 }
 
-public enum TextLineEnding: String, Equatable, Sendable {
+public enum TextLineEnding: String, Codable, Equatable, Hashable, Sendable {
     case lf
 }
 
@@ -24,7 +34,7 @@ extension FileDigestValidationError: LocalizedError {
     }
 }
 
-public struct FileDigest: Equatable, Sendable {
+public struct FileDigest: Codable, Equatable, Hashable, Sendable {
     public static let requiredByteCount: Int = 32
 
     public let bytes: Data
@@ -37,6 +47,16 @@ public struct FileDigest: Equatable, Sendable {
             )
         }
         self.bytes = bytes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        try self.init(bytes: container.decode(Data.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(bytes)
     }
 }
 
@@ -53,7 +73,7 @@ extension FileBookmarkValidationError: LocalizedError {
     }
 }
 
-public struct FileBookmark: Equatable, Sendable {
+public struct FileBookmark: Codable, Equatable, Hashable, Sendable {
     public let data: Data
 
     public init(data: Data) throws {
@@ -61,6 +81,16 @@ public struct FileBookmark: Equatable, Sendable {
             throw FileBookmarkValidationError.empty
         }
         self.data = data
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        try self.init(data: container.decode(Data.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(data)
     }
 }
 
@@ -86,7 +116,7 @@ extension FileNameValidationError: LocalizedError {
     }
 }
 
-public struct ValidatedFileName: Equatable, Sendable {
+public struct ValidatedFileName: Codable, Equatable, Hashable, Sendable {
     public let value: String
 
     public init(validating value: String) throws {
@@ -103,6 +133,16 @@ public struct ValidatedFileName: Equatable, Sendable {
             throw FileNameValidationError.containsNullByte
         }
         self.value = value
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        try self.init(validating: container.decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
     }
 }
 
@@ -144,10 +184,29 @@ extension NewTextFileEncodingError: LocalizedError {
 public struct FileBinding: Equatable, Sendable {
     public let locatorURL: URL
     public let bookmark: FileBookmark
+    public let identity: FileIdentity?
     public let displayName: ValidatedFileName
     public let digest: FileDigest
     public let encoding: TextFileEncoding
     public let lineEnding: TextLineEnding
+
+    public init(
+        locatorURL: URL,
+        bookmark: FileBookmark,
+        identity: FileIdentity?,
+        displayName: ValidatedFileName,
+        digest: FileDigest,
+        encoding: TextFileEncoding,
+        lineEnding: TextLineEnding
+    ) {
+        self.locatorURL = locatorURL
+        self.bookmark = bookmark
+        self.identity = identity
+        self.displayName = displayName
+        self.digest = digest
+        self.encoding = encoding
+        self.lineEnding = lineEnding
+    }
 
     public init(
         locatorURL: URL,
@@ -157,13 +216,54 @@ public struct FileBinding: Equatable, Sendable {
         encoding: TextFileEncoding,
         lineEnding: TextLineEnding
     ) {
-        self.locatorURL = locatorURL
+        self.init(
+            locatorURL: locatorURL,
+            bookmark: bookmark,
+            identity: nil,
+            displayName: displayName,
+            digest: digest,
+            encoding: encoding,
+            lineEnding: lineEnding
+        )
+    }
+}
+
+public struct RecoveryFileReference: Codable, Equatable, Hashable, Sendable {
+    public let bookmark: FileBookmark
+    public let identity: FileIdentity?
+    public let displayName: ValidatedFileName
+    public let cleanDigest: FileDigest
+    public let encoding: TextFileEncoding
+    public let lineEnding: TextLineEnding
+
+    public init(
+        bookmark: FileBookmark,
+        identity: FileIdentity?,
+        displayName: ValidatedFileName,
+        cleanDigest: FileDigest,
+        encoding: TextFileEncoding,
+        lineEnding: TextLineEnding
+    ) {
         self.bookmark = bookmark
+        self.identity = identity
         self.displayName = displayName
-        self.digest = digest
+        self.cleanDigest = cleanDigest
         self.encoding = encoding
         self.lineEnding = lineEnding
     }
+}
+
+public func makeRecoveryFileReference(
+    fileBinding: FileBinding
+) -> RecoveryFileReference {
+    RecoveryFileReference(
+        bookmark: fileBinding.bookmark,
+        identity: fileBinding.identity,
+        displayName: fileBinding.displayName,
+        cleanDigest: fileBinding.digest,
+        encoding: fileBinding.encoding,
+        lineEnding: fileBinding.lineEnding
+    )
 }
 
 public func encodeNewTextFile(text: String) throws -> EncodedTextFile {

@@ -29,6 +29,8 @@
 		C00000000000000000000015 /* PhonePadSaveWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000015 /* PhonePadSaveWorkflow.swift */; };
 		C00000000000000000000016 /* PhonePadSaveWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000016 /* PhonePadSaveWorkflowTests.swift */; };
 		C00000000000000000000017 /* PhonePadFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000017 /* PhonePadFolderPicker.swift */; };
+		C00000000000000000000018 /* PhonePadBoundFileWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000018 /* PhonePadBoundFileWorkflow.swift */; };
+		C00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */; };
 		C00000000000000000000020 /* PhonePadCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; };
 		C00000000000000000000021 /* PhonePadCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		C00000000000000000000022 /* PhonePadCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; };
@@ -109,6 +111,8 @@
 		B00000000000000000000015 /* PhonePadSaveWorkflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadSaveWorkflow.swift; sourceTree = "<group>"; };
 		B00000000000000000000016 /* PhonePadSaveWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadSaveWorkflowTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000017 /* PhonePadFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadFolderPicker.swift; sourceTree = "<group>"; };
+		B00000000000000000000018 /* PhonePadBoundFileWorkflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadBoundFileWorkflow.swift; sourceTree = "<group>"; };
+		B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadBoundFileWorkflowTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000020 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
 		B00000000000000000000021 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		B00000000000000000000022 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
@@ -211,6 +215,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000012 /* FileAccessConnector.swift */,
+				B00000000000000000000018 /* PhonePadBoundFileWorkflow.swift */,
 				B00000000000000000000017 /* PhonePadFolderPicker.swift */,
 				B00000000000000000000001 /* PhonePadApp.swift */,
 				B00000000000000000000002 /* PhonePadRootView.swift */,
@@ -241,6 +246,7 @@
 				B00000000000000000000013 /* FileModelsTests.swift */,
 				B00000000000000000000010 /* FileRecoveryStoreRecoveryItemsTests.swift */,
 				B0000000000000000000000E /* PhonePadAppModelTests.swift */,
+				B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */,
 				B00000000000000000000016 /* PhonePadSaveWorkflowTests.swift */,
 				B0000000000000000000000A /* PhonePadWorkflowTests.swift */,
 				B0000000000000000000000B /* PhonePadTextEditorTests.swift */,
@@ -463,6 +469,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000012 /* FileAccessConnector.swift in Sources */,
+				C00000000000000000000018 /* PhonePadBoundFileWorkflow.swift in Sources */,
 				C00000000000000000000017 /* PhonePadFolderPicker.swift in Sources */,
 				C00000000000000000000001 /* PhonePadApp.swift in Sources */,
 				C00000000000000000000002 /* PhonePadRootView.swift in Sources */,
@@ -493,6 +500,7 @@
 				C00000000000000000000013 /* FileModelsTests.swift in Sources */,
 				C00000000000000000000010 /* FileRecoveryStoreRecoveryItemsTests.swift in Sources */,
 				C0000000000000000000000E /* PhonePadAppModelTests.swift in Sources */,
+				C00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift in Sources */,
 				C00000000000000000000016 /* PhonePadSaveWorkflowTests.swift in Sources */,
 				C0000000000000000000000A /* PhonePadWorkflowTests.swift in Sources */,
 				C0000000000000000000000B /* PhonePadTextEditorTests.swift in Sources */,

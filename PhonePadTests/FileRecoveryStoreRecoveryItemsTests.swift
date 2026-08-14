@@ -126,7 +126,56 @@ final class FileRecoveryStoreRecoveryItemsTests: XCTestCase {
 
         XCTAssertEqual(loadedEnvelope?.title, "Unsafe Title")
         XCTAssertEqual(loadedEnvelope?.text, privateText)
+        XCTAssertNil(loadedEnvelope?.fileReference)
+        XCTAssertNil(loadedEnvelope?.pendingSave)
         XCTAssertEqual(try Data(contentsOf: canonicalURL), storedData)
+    }
+
+    func testSaveAndLoadPreserveDurableFileRecoveryMetadataWithoutRawLocator() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "15500000-0000-0000-0000-000000000001")!
+        )
+        let fileReference = RecoveryFileReference(
+            bookmark: try FileBookmark(data: Data("provider-bookmark".utf8)),
+            identity: FileIdentity(
+                volumeUUID: UUID(uuidString: "15500000-0000-0000-0000-000000000002")!,
+                documentIdentifier: 42
+            ),
+            displayName: try ValidatedFileName(validating: "Original.txt"),
+            cleanDigest: try FileDigest(bytes: Data(repeating: 0x11, count: 32)),
+            encoding: .utf8,
+            lineEnding: .lf
+        )
+        let pendingSave = RecoveryPendingSave(
+            intendedOutputDigest: try FileDigest(
+                bytes: Data(repeating: 0x22, count: 32)
+            )
+        )
+        let storedEnvelope = try RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: documentID,
+            title: "/private/customer/Unsafe\nTitle",
+            text: "Unsaved edits",
+            editedAt: Date(timeIntervalSince1970: 1_786_650_055),
+            fileReference: fileReference,
+            pendingSave: pendingSave
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        try await store.save(envelope: storedEnvelope)
+        let loadedEnvelope = try await store.load(documentID: documentID)
+        let serializedData = try Data(
+            contentsOf: canonicalURL(rootURL: rootURL, documentID: documentID)
+        )
+        let serializedText = try XCTUnwrap(String(data: serializedData, encoding: .utf8))
+
+        XCTAssertEqual(loadedEnvelope?.title, "Unsafe Title")
+        XCTAssertEqual(loadedEnvelope?.text, storedEnvelope.text)
+        XCTAssertEqual(loadedEnvelope?.fileReference, fileReference)
+        XCTAssertEqual(loadedEnvelope?.pendingSave, pendingSave)
+        XCTAssertFalse(serializedText.contains("/private/customer"))
+        XCTAssertFalse(serializedText.contains("file://"))
     }
 
     func testRecoveryItemsClassifiesAndRetainsEnvelopeWithOversizedMetadata() async throws {
@@ -165,6 +214,111 @@ final class FileRecoveryStoreRecoveryItemsTests: XCTestCase {
             XCTFail("Expected oversized metadata to be rejected.")
         } catch let error as FileRecoveryStoreError {
             XCTAssertTrue(error.localizedDescription.contains("64 KiB"))
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), storedData)
+    }
+
+    func testSaveRejectsOversizedBookmarkMetadataBeforeWritingArtifact() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "16500000-0000-0000-0000-000000000001")!
+        )
+        let fileReference = RecoveryFileReference(
+            bookmark: try FileBookmark(data: Data(repeating: 0x41, count: 49 * 1_024)),
+            identity: nil,
+            displayName: try ValidatedFileName(validating: "Oversized.txt"),
+            cleanDigest: try FileDigest(bytes: Data(repeating: 0x33, count: 32)),
+            encoding: .utf8,
+            lineEnding: .lf
+        )
+        let envelope = try RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: documentID,
+            title: "Oversized Bookmark",
+            text: "Small content",
+            editedAt: Date(timeIntervalSince1970: 1_786_650_065),
+            fileReference: fileReference,
+            pendingSave: nil
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        do {
+            try await store.save(envelope: envelope)
+            XCTFail("Expected oversized recovery metadata to be rejected.")
+        } catch let error as FileRecoveryStoreError {
+            guard case let .checkpointMetadataExceedsMaximumSize(
+                actualDocumentID,
+                actualByteCount,
+                maximumByteCount,
+                _
+            ) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(actualDocumentID, documentID)
+            XCTAssertGreaterThan(actualByteCount, UInt64(64 * 1_024))
+            XCTAssertEqual(maximumByteCount, UInt64(64 * 1_024))
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: canonicalURL(rootURL: rootURL, documentID: documentID).path
+            )
+        )
+    }
+
+    func testLoadRejectsAndRetainsOversizedBookmarkMetadata() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "16600000-0000-0000-0000-000000000001")!
+        )
+        let fileReference = RecoveryFileReference(
+            bookmark: try FileBookmark(data: Data(repeating: 0x42, count: 49 * 1_024)),
+            identity: nil,
+            displayName: try ValidatedFileName(validating: "Retained.txt"),
+            cleanDigest: try FileDigest(bytes: Data(repeating: 0x44, count: 32)),
+            encoding: .utf8,
+            lineEnding: .lf
+        )
+        let envelope = try RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: documentID,
+            title: "Retained Oversized Bookmark",
+            text: "Small content",
+            editedAt: Date(timeIntervalSince1970: 1_786_650_066),
+            fileReference: fileReference,
+            pendingSave: nil
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        let storedData = try JSONEncoder().encode(envelope)
+        try storedData.write(to: canonicalURL, options: .completeFileProtection)
+        try applyProtectedMetadata(to: canonicalURL)
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        let items = try await store.recoveryItems()
+
+        XCTAssertEqual(
+            items,
+            [
+                RecoveryItemSummary(
+                    documentID: documentID,
+                    title: "Recovered Document",
+                    lastEdited: .unavailable,
+                    status: .corrupt
+                )
+            ]
+        )
+        do {
+            _ = try await store.load(documentID: documentID)
+            XCTFail("Expected oversized recovery metadata to be rejected.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .checkpointMetadataExceedsMaximumSize = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
             XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -266,6 +420,81 @@ final class FileRecoveryStoreRecoveryItemsTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: unsupportedURL), unsupportedData)
         XCTAssertTrue(FileManager.default.fileExists(atPath: hiddenSidecar.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
+    func testRecoveryItemsRetainsAndReportsInvalidFileReferenceAndPendingSave() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let invalidReferenceID = DocumentID(
+            rawValue: UUID(uuidString: "20500000-0000-0000-0000-000000000001")!
+        )
+        let invalidPendingSaveID = DocumentID(
+            rawValue: UUID(uuidString: "20500000-0000-0000-0000-000000000002")!
+        )
+        let invalidReferenceURL = canonicalURL(
+            rootURL: rootURL,
+            documentID: invalidReferenceID
+        )
+        let invalidPendingSaveURL = canonicalURL(
+            rootURL: rootURL,
+            documentID: invalidPendingSaveID
+        )
+        let digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        let invalidReferenceData = Data(
+            """
+            {"documentID":{"rawValue":"20500000-0000-0000-0000-000000000001"},"editedAt":0,"fileReference":{"bookmark":"","cleanDigest":"\(digest)","displayName":"Invalid.txt","encoding":"utf8","lineEnding":"lf"},"formatVersion":1,"text":"retained reference","title":"Invalid Reference"}
+            """.utf8
+        )
+        let invalidPendingSaveData = Data(
+            """
+            {"documentID":{"rawValue":"20500000-0000-0000-0000-000000000002"},"editedAt":0,"formatVersion":1,"pendingSave":{"intendedOutputDigest":"\(digest)"},"text":"retained pending save","title":"Invalid Pending Save"}
+            """.utf8
+        )
+        try invalidReferenceData.write(
+            to: invalidReferenceURL,
+            options: .completeFileProtection
+        )
+        try invalidPendingSaveData.write(
+            to: invalidPendingSaveURL,
+            options: .completeFileProtection
+        )
+        try applyProtectedMetadata(to: invalidReferenceURL)
+        try applyProtectedMetadata(to: invalidPendingSaveURL)
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        let items = try await store.recoveryItems()
+
+        XCTAssertEqual(
+            items,
+            [
+                RecoveryItemSummary(
+                    documentID: invalidReferenceID,
+                    title: "Recovered Document",
+                    lastEdited: .unavailable,
+                    status: .corrupt
+                ),
+                RecoveryItemSummary(
+                    documentID: invalidPendingSaveID,
+                    title: "Recovered Document",
+                    lastEdited: .unavailable,
+                    status: .corrupt
+                ),
+            ]
+        )
+        for documentID in [invalidReferenceID, invalidPendingSaveID] {
+            do {
+                _ = try await store.load(documentID: documentID)
+                XCTFail("Expected invalid recovery metadata to be rejected.")
+            } catch let error as FileRecoveryStoreError {
+                guard case .couldNotDecodeCheckpoint = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: invalidReferenceURL), invalidReferenceData)
+        XCTAssertEqual(try Data(contentsOf: invalidPendingSaveURL), invalidPendingSaveData)
     }
 
     func testRecoveryItemsKeepsOtherRowsWhenOneCanonicalMetadataIsUnavailable() async throws {

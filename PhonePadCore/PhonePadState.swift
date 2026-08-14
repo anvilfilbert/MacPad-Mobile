@@ -27,6 +27,7 @@ public struct PhonePadDocument: Equatable, Sendable {
     public let title: String
     public let text: String
     public let fileBinding: FileBinding?
+    public let recoveryFileReference: RecoveryFileReference?
     public let isUnsaved: Bool
     public let recoveryState: DocumentRecoveryState
 
@@ -42,6 +43,7 @@ public struct PhonePadDocument: Equatable, Sendable {
             title: title,
             text: text,
             fileBinding: nil,
+            recoveryFileReference: nil,
             isUnsaved: isUnsaved,
             recoveryState: recoveryState
         )
@@ -55,10 +57,31 @@ public struct PhonePadDocument: Equatable, Sendable {
         isUnsaved: Bool,
         recoveryState: DocumentRecoveryState
     ) {
+        self.init(
+            id: id,
+            title: title,
+            text: text,
+            fileBinding: fileBinding,
+            recoveryFileReference: fileBinding.map(makeRecoveryFileReference),
+            isUnsaved: isUnsaved,
+            recoveryState: recoveryState
+        )
+    }
+
+    init(
+        id: DocumentID,
+        title: String,
+        text: String,
+        fileBinding: FileBinding?,
+        recoveryFileReference: RecoveryFileReference?,
+        isUnsaved: Bool,
+        recoveryState: DocumentRecoveryState
+    ) {
         self.id = id
         self.title = title
         self.text = text
         self.fileBinding = fileBinding
+        self.recoveryFileReference = recoveryFileReference
         self.isUnsaved = isUnsaved
         self.recoveryState = recoveryState
     }
@@ -158,6 +181,8 @@ public func recoverDocument(
         id: envelope.documentID,
         title: envelope.title,
         text: envelope.text,
+        fileBinding: nil,
+        recoveryFileReference: envelope.fileReference,
         isUnsaved: true,
         recoveryState: .protectedUnsaved
     )
@@ -174,22 +199,28 @@ public func beginActiveDocumentEdit(
     editedAt: Date
 ) throws -> RecoveryEditTransition {
     let activeTab = try requireActiveTab(state: state)
+    let recoveryFileReference = activeTab.document.fileBinding
+        .map(makeRecoveryFileReference)
+        ?? activeTab.document.recoveryFileReference
     let editedDocument = PhonePadDocument(
         id: activeTab.document.id,
         title: activeTab.document.title,
         text: newText,
         fileBinding: activeTab.document.fileBinding,
+        recoveryFileReference: recoveryFileReference,
         isUnsaved: true,
         recoveryState: .checkpointPending
     )
     let editedTab = PhonePadTab(id: activeTab.id, document: editedDocument)
     let editedState = try replacingActiveTab(state: state, with: editedTab)
-    let envelope = RecoveryEnvelope(
+    let envelope = try RecoveryEnvelope(
         formatVersion: RecoveryEnvelope.currentFormatVersion,
         documentID: editedDocument.id,
         title: editedDocument.title,
         text: editedDocument.text,
-        editedAt: editedAt
+        editedAt: editedAt,
+        fileReference: recoveryFileReference,
+        pendingSave: nil
     )
     return RecoveryEditTransition(state: editedState, envelope: envelope)
 }
@@ -203,6 +234,7 @@ public func markActiveDocumentRecoveryProtected(
         title: activeTab.document.title,
         text: activeTab.document.text,
         fileBinding: activeTab.document.fileBinding,
+        recoveryFileReference: activeTab.document.recoveryFileReference,
         isUnsaved: activeTab.document.isUnsaved,
         recoveryState: .protectedUnsaved
     )
@@ -253,6 +285,65 @@ public func markActiveDocumentSavedToDetachedFile(
     )
     let savedTab = PhonePadTab(id: activeTab.id, document: savedDocument)
     return try replacingActiveTab(state: state, with: savedTab)
+}
+
+public func openBoundDocument(
+    state: PhonePadState,
+    documentID: DocumentID,
+    tabID: TabID,
+    text: String,
+    fileBinding: FileBinding
+) -> PhonePadState {
+    if let existingTab = state.tabs.first(where: { tab in
+        guard let existingBinding = tab.document.fileBinding else {
+            return false
+        }
+        return fileBindingsReferToSameFile(
+            existing: existingBinding,
+            candidate: fileBinding
+        )
+    }) {
+        return PhonePadState(tabs: state.tabs, activeTabID: existingTab.id)
+    }
+    let document = PhonePadDocument(
+        id: documentID,
+        title: fileBinding.displayName.value,
+        text: text,
+        fileBinding: fileBinding,
+        isUnsaved: false,
+        recoveryState: .clean
+    )
+    let tab = PhonePadTab(id: tabID, document: document)
+    guard !isPristineSoleUntitled(state: state) else {
+        return PhonePadState(tabs: [tab], activeTabID: tab.id)
+    }
+    return PhonePadState(tabs: state.tabs + [tab], activeTabID: tab.id)
+}
+
+public func fileBindingsReferToSameFile(
+    existing: FileBinding,
+    candidate: FileBinding
+) -> Bool {
+    switch (existing.identity, candidate.identity) {
+    case let (.some(existingIdentity), .some(candidateIdentity)):
+        return existingIdentity == candidateIdentity
+    case (.none, .none):
+        return existing.locatorURL.standardizedFileURL
+            == candidate.locatorURL.standardizedFileURL
+    case (.some, .none), (.none, .some):
+        return false
+    }
+}
+
+private func isPristineSoleUntitled(state: PhonePadState) -> Bool {
+    guard state.tabs.count == 1, let document = state.tabs.first?.document else {
+        return false
+    }
+    return document.title == "Untitled"
+        && document.text.isEmpty
+        && document.fileBinding == nil
+        && !document.isUnsaved
+        && document.recoveryState == .clean
 }
 
 private func requireActiveTab(state: PhonePadState) throws -> PhonePadTab {

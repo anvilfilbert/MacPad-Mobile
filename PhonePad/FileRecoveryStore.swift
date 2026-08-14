@@ -188,7 +188,7 @@ public actor FileRecoveryStore: RecoveryStoring {
             )
         }
 
-        let protectedEnvelope = recoveryEnvelopeForUse(envelope)
+        let protectedEnvelope = try recoveryEnvelopeForUse(envelope)
         try validateEnvelopeBounds(envelope: protectedEnvelope, url: paths.staging)
         let encodedEnvelope = try encode(envelope: protectedEnvelope)
         do {
@@ -1191,7 +1191,7 @@ public actor FileRecoveryStore: RecoveryStoring {
             )
         }
         try validateEnvelopeBounds(envelope: envelope, url: url)
-        return (data, recoveryEnvelopeForUse(envelope))
+        return (data, try recoveryEnvelopeForUse(envelope))
     }
 
     private func recoveryFileByteCount(
@@ -1242,13 +1242,24 @@ public actor FileRecoveryStore: RecoveryStoring {
             )
         }
 
-        let metadataEnvelope = RecoveryEnvelope(
-            formatVersion: envelope.formatVersion,
-            documentID: envelope.documentID,
-            title: envelope.title,
-            text: "",
-            editedAt: envelope.editedAt
-        )
+        let metadataEnvelope: RecoveryEnvelope
+        do {
+            metadataEnvelope = try RecoveryEnvelope(
+                formatVersion: envelope.formatVersion,
+                documentID: envelope.documentID,
+                title: envelope.title,
+                text: "",
+                editedAt: envelope.editedAt,
+                fileReference: envelope.fileReference,
+                pendingSave: envelope.pendingSave
+            )
+        } catch {
+            throw FileRecoveryStoreError.couldNotDecodeCheckpoint(
+                envelope.documentID,
+                url,
+                String(describing: error)
+            )
+        }
         let metadataByteCount: UInt64
         do {
             metadataByteCount = UInt64(try JSONEncoder().encode(metadataEnvelope).count)
@@ -1482,13 +1493,15 @@ private func recoveryDisplayTitle(_ title: String) -> String {
     return String(trimmed.prefix(255))
 }
 
-private func recoveryEnvelopeForUse(_ envelope: RecoveryEnvelope) -> RecoveryEnvelope {
-    RecoveryEnvelope(
+private func recoveryEnvelopeForUse(_ envelope: RecoveryEnvelope) throws -> RecoveryEnvelope {
+    try RecoveryEnvelope(
         formatVersion: envelope.formatVersion,
         documentID: envelope.documentID,
         title: recoveryDisplayTitle(envelope.title),
         text: envelope.text,
-        editedAt: envelope.editedAt
+        editedAt: envelope.editedAt,
+        fileReference: envelope.fileReference,
+        pendingSave: envelope.pendingSave
     )
 }
 
