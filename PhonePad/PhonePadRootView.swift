@@ -9,17 +9,40 @@ private struct RecoveryDiscardCandidate: Identifiable {
     }
 }
 
+private enum PhonePadSaveAsPresentationError: Error, LocalizedError {
+    case missingPreparation
+
+    var errorDescription: String? {
+        switch self {
+        case .missingPreparation:
+            return "Save As configuration is no longer available. Choose Save and try again."
+        }
+    }
+}
+
 struct PhonePadRootView: View {
     @ObservedObject private var model: PhonePadAppModel
     @State private var editorTransitionController: PhonePadEditorTransitionController
     @State private var recoveryIsPresented: Bool
     @State private var discardCandidate: RecoveryDiscardCandidate?
+    @State private var saveAsIsPresented: Bool
+    @State private var saveAsFileName: String
+    @State private var saveAsEncoding: TextFileEncoding
+    @State private var preparedNewFileSave: PreparedNewFileSave?
+    @State private var folderPickerIsPresented: Bool
+    @State private var saveAsValidationError: String?
 
     init(model: PhonePadAppModel) {
         self.model = model
         editorTransitionController = PhonePadEditorTransitionController()
         recoveryIsPresented = false
         discardCandidate = nil
+        saveAsIsPresented = false
+        saveAsFileName = "Untitled.txt"
+        saveAsEncoding = .utf8
+        preparedNewFileSave = nil
+        folderPickerIsPresented = false
+        saveAsValidationError = nil
     }
 
     var body: some View {
@@ -34,6 +57,7 @@ struct PhonePadRootView: View {
                     ),
                     transitionController: editorTransitionController
                 )
+                .disabled(model.fileMutationDisabled)
             }
             .navigationTitle(model.state.activeTab.document.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -56,8 +80,14 @@ struct PhonePadRootView: View {
                     .accessibilityIdentifier("phonepad.recovery-error")
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            fileSaveFeedback
+        }
         .sheet(isPresented: $recoveryIsPresented) {
             recoverySheet
+        }
+        .sheet(isPresented: $saveAsIsPresented) {
+            saveAsSheet
         }
         .task {
             await model.refreshRecoveryItems()
@@ -66,6 +96,13 @@ struct PhonePadRootView: View {
 
     private var actionMenu: some View {
         Menu {
+            Button {
+                presentSaveAs()
+            } label: {
+                Label("Save", systemImage: "square.and.arrow.down")
+            }
+            .accessibilityIdentifier("phonepad.action-menu.save")
+
             Button {
                 recoveryIsPresented = true
             } label: {
@@ -93,6 +130,258 @@ struct PhonePadRootView: View {
         .accessibilityIdentifier("phonepad.action-menu")
         .accessibilityLabel("Actions")
         .accessibilityValue(actionMenuAccessibilityValue)
+        .disabled(model.fileMutationDisabled)
+    }
+
+    private var saveAsSheet: some View {
+        NavigationStack {
+            Form {
+                Section("New File") {
+                    TextField("File Name", text: $saveAsFileName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .disabled(model.fileMutationDisabled)
+                        .accessibilityIdentifier("phonepad.save-as.filename")
+
+                    Picker("Encoding", selection: $saveAsEncoding) {
+                        Text("UTF-8")
+                            .tag(TextFileEncoding.utf8)
+                            .accessibilityIdentifier("phonepad.save-as.encoding.utf8")
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(model.fileMutationDisabled)
+                    .accessibilityIdentifier("phonepad.save-as.encoding")
+                }
+
+                if let saveAsValidationError {
+                    Section {
+                        Text(saveAsValidationError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("phonepad.save-as.validation-error")
+                    }
+                }
+
+                if let fileSaveError = model.fileSaveError {
+                    Section {
+                        Text(fileSaveError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("phonepad.save-as.error")
+
+                        if model.fileSaveCleanupRequired {
+                            Button("Retry Cleanup") {
+                                retrySaveCleanupFromSheet()
+                            }
+                            .accessibilityIdentifier(
+                                "phonepad.save-as.retry-cleanup"
+                            )
+                        }
+                    }
+                    .accessibilityIdentifier("phonepad.save-as.cleanup-required")
+                }
+
+                if model.fileSaveInProgress {
+                    Section {
+                        ProgressView("Saving File")
+                            .accessibilityIdentifier("phonepad.save-as.progress")
+                    }
+                }
+            }
+            .disabled(model.fileSaveInProgress)
+            .navigationTitle("Save As")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) {
+                        cancelSaveAs()
+                    }
+                    .disabled(model.fileMutationDisabled)
+                    .accessibilityIdentifier("phonepad.save-as.cancel")
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Choose Folder") {
+                        chooseSaveFolder()
+                    }
+                    .disabled(model.fileMutationDisabled)
+                    .accessibilityIdentifier("phonepad.save-as.choose-folder")
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("phonepad.save-as.sheet")
+        .interactiveDismissDisabled(model.fileMutationDisabled)
+        .presentationDetents([.medium, .large])
+        .sheet(isPresented: $folderPickerIsPresented) {
+            PhonePadFolderPicker(
+                onSelection: selectSaveFolder,
+                onCancellation: cancelFolderPicker,
+                onFailure: failFolderPicker
+            )
+            .accessibilityIdentifier("phonepad.save-as.folder-picker")
+        }
+    }
+
+    @ViewBuilder
+    private var fileSaveFeedback: some View {
+        if !saveAsIsPresented, model.fileSaveCleanupRequired,
+           let fileSaveError = model.fileSaveError {
+            cleanupRequiredFeedbackBanner(message: fileSaveError)
+        } else if !saveAsIsPresented,
+           let fileSaveError = model.fileSaveError {
+            fileSaveFeedbackBanner(
+                message: fileSaveError,
+                color: .red,
+                messageIdentifier: "phonepad.save.error"
+            )
+        } else if let fileSaveNotice = model.fileSaveNotice {
+            fileSaveFeedbackBanner(
+                message: fileSaveNotice,
+                color: .orange,
+                messageIdentifier: "phonepad.save.notice"
+            )
+        }
+    }
+
+    private func cleanupRequiredFeedbackBanner(message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message)
+                .font(.footnote)
+                .accessibilityIdentifier("phonepad.save.error")
+
+            Button("Retry Cleanup") {
+                retrySaveCleanupFromBanner()
+            }
+            .disabled(model.fileSaveInProgress)
+            .accessibilityIdentifier("phonepad.save.retry-cleanup")
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.red)
+    }
+
+    private func fileSaveFeedbackBanner(
+        message: String,
+        color: Color,
+        messageIdentifier: String
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(message)
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier(messageIdentifier)
+
+            Button {
+                model.clearFileSaveFeedback()
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Dismiss")
+            .accessibilityIdentifier("phonepad.file-save-feedback.dismiss")
+        }
+        .foregroundStyle(.white)
+        .padding(8)
+        .background(color)
+    }
+
+    private func presentSaveAs() {
+        model.clearFileSaveFeedback()
+        do {
+            try editorTransitionController.commitMarkedText()
+        } catch {
+            model.reportFileSaveTransitionError(error)
+            return
+        }
+
+        saveAsFileName = suggestedFileName()
+        saveAsEncoding = .utf8
+        preparedNewFileSave = nil
+        saveAsValidationError = nil
+        saveAsIsPresented = true
+    }
+
+    private func suggestedFileName() -> String {
+        let title = model.state.activeTab.document.title
+        if title.lowercased().hasSuffix(".txt") {
+            return title
+        }
+        return title + ".txt"
+    }
+
+    private func chooseSaveFolder() {
+        model.clearFileSaveFeedback()
+        do {
+            preparedNewFileSave = try model.prepareNewDocumentSave(
+                fileName: saveAsFileName,
+                encoding: saveAsEncoding
+            )
+            saveAsValidationError = nil
+            folderPickerIsPresented = true
+        } catch {
+            preparedNewFileSave = nil
+            saveAsValidationError = error.localizedDescription
+        }
+    }
+
+    private func selectSaveFolder(_ selectedFolderURL: URL) {
+        folderPickerIsPresented = false
+        guard let preparedNewFileSave else {
+            model.reportFileSaveTransitionError(
+                PhonePadSaveAsPresentationError.missingPreparation
+            )
+            return
+        }
+
+        Task { @MainActor in
+            let saved = await model.saveNewDocument(
+                preparation: preparedNewFileSave,
+                selectedFolderURL: selectedFolderURL
+            )
+            guard saved else {
+                return
+            }
+            self.preparedNewFileSave = nil
+            saveAsValidationError = nil
+            saveAsIsPresented = false
+        }
+    }
+
+    private func cancelFolderPicker() {
+        folderPickerIsPresented = false
+    }
+
+    private func failFolderPicker(_ error: Error) {
+        folderPickerIsPresented = false
+        model.reportFileSaveTransitionError(error)
+    }
+
+    private func cancelSaveAs() {
+        model.clearFileSaveFeedback()
+        preparedNewFileSave = nil
+        saveAsValidationError = nil
+        folderPickerIsPresented = false
+        saveAsIsPresented = false
+    }
+
+    private func retrySaveCleanupFromSheet() {
+        Task { @MainActor in
+            let cleanupCompleted = await model.retryFileSaveCleanup()
+            guard cleanupCompleted else {
+                return
+            }
+            preparedNewFileSave = nil
+            saveAsValidationError = nil
+            saveAsIsPresented = false
+        }
+    }
+
+    private func retrySaveCleanupFromBanner() {
+        Task { @MainActor in
+            _ = await model.retryFileSaveCleanup()
+        }
     }
 
     private var recoverySheet: some View {

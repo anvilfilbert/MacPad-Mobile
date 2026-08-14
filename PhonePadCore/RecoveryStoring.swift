@@ -31,10 +31,21 @@ public struct RecoveryItemSummary: Equatable, Sendable {
     }
 }
 
+public enum RecoveryTerminalOutcome: Equatable, Sendable {
+    case complete
+    case residualCleanupPending
+}
+
 public protocol RecoveryStoring: Sendable {
     func save(envelope: RecoveryEnvelope) async throws
     func load(documentID: DocumentID) async throws -> RecoveryEnvelope?
     func verifyCheckpoint(documentID: DocumentID) async throws -> RecoveryCheckpointVerification
     func recoveryItems() async throws -> [RecoveryItemSummary]
-    func discardRecovery(documentID: DocumentID) async throws
+    @discardableResult
+    func discardRecovery(documentID: DocumentID) async throws -> RecoveryTerminalOutcome
+
+    @discardableResult
+    func completeRecoveryAfterSave(
+        documentID: DocumentID
+    ) async throws -> RecoveryTerminalOutcome
 }

@@ -1,0 +1,188 @@
+import CryptoKit
+import Foundation
+
+public let maximumSupportedTextFileByteCount: Int = 25 * 1024 * 1024
+
+public enum TextFileEncoding: String, Equatable, Hashable, Sendable {
+    case utf8
+}
+
+public enum TextLineEnding: String, Equatable, Sendable {
+    case lf
+}
+
+public enum FileDigestValidationError: Error, Equatable, Sendable {
+    case invalidByteCount(actualByteCount: Int, requiredByteCount: Int)
+}
+
+extension FileDigestValidationError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case let .invalidByteCount(actualByteCount, requiredByteCount):
+            return "File digest contains \(actualByteCount) bytes; SHA-256 requires exactly \(requiredByteCount) bytes."
+        }
+    }
+}
+
+public struct FileDigest: Equatable, Sendable {
+    public static let requiredByteCount: Int = 32
+
+    public let bytes: Data
+
+    public init(bytes: Data) throws {
+        guard bytes.count == Self.requiredByteCount else {
+            throw FileDigestValidationError.invalidByteCount(
+                actualByteCount: bytes.count,
+                requiredByteCount: Self.requiredByteCount
+            )
+        }
+        self.bytes = bytes
+    }
+}
+
+public enum FileBookmarkValidationError: Error, Equatable, Sendable {
+    case empty
+}
+
+extension FileBookmarkValidationError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .empty:
+            return "File bookmark is empty and cannot provide durable access to the saved File."
+        }
+    }
+}
+
+public struct FileBookmark: Equatable, Sendable {
+    public let data: Data
+
+    public init(data: Data) throws {
+        guard !data.isEmpty else {
+            throw FileBookmarkValidationError.empty
+        }
+        self.data = data
+    }
+}
+
+public enum FileNameValidationError: Error, Equatable, Sendable {
+    case empty
+    case reservedComponent(String)
+    case multipleComponents
+    case containsNullByte
+}
+
+extension FileNameValidationError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .empty:
+            return "File name is empty. Enter a name before saving."
+        case let .reservedComponent(component):
+            return "\(component) cannot be used as a File name. Enter a regular name before saving."
+        case .multipleComponents:
+            return "File name contains a path separator. Choose the folder separately and enter one File name."
+        case .containsNullByte:
+            return "File name contains an unsupported null character. Remove it before saving."
+        }
+    }
+}
+
+public struct ValidatedFileName: Equatable, Sendable {
+    public let value: String
+
+    public init(validating value: String) throws {
+        guard !value.isEmpty else {
+            throw FileNameValidationError.empty
+        }
+        guard value != ".", value != ".." else {
+            throw FileNameValidationError.reservedComponent(value)
+        }
+        guard !value.contains("/") else {
+            throw FileNameValidationError.multipleComponents
+        }
+        guard !value.contains("\0") else {
+            throw FileNameValidationError.containsNullByte
+        }
+        self.value = value
+    }
+}
+
+public struct EncodedTextFile: Equatable, Sendable {
+    public let text: String
+    public let data: Data
+    public let digest: FileDigest
+    public let encoding: TextFileEncoding
+    public let lineEnding: TextLineEnding
+
+    init(
+        text: String,
+        data: Data,
+        digest: FileDigest,
+        encoding: TextFileEncoding,
+        lineEnding: TextLineEnding
+    ) {
+        self.text = text
+        self.data = data
+        self.digest = digest
+        self.encoding = encoding
+        self.lineEnding = lineEnding
+    }
+}
+
+public enum NewTextFileEncodingError: Error, Equatable, Sendable {
+    case contentTooLarge(actualByteCount: Int, maximumByteCount: Int)
+}
+
+extension NewTextFileEncodingError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case let .contentTooLarge(actualByteCount, maximumByteCount):
+            return "Encoded File is \(actualByteCount) bytes; PhonePad supports at most \(maximumByteCount) bytes. Shorten the Document before saving."
+        }
+    }
+}
+
+public struct FileBinding: Equatable, Sendable {
+    public let locatorURL: URL
+    public let bookmark: FileBookmark
+    public let displayName: ValidatedFileName
+    public let digest: FileDigest
+    public let encoding: TextFileEncoding
+    public let lineEnding: TextLineEnding
+
+    public init(
+        locatorURL: URL,
+        bookmark: FileBookmark,
+        displayName: ValidatedFileName,
+        digest: FileDigest,
+        encoding: TextFileEncoding,
+        lineEnding: TextLineEnding
+    ) {
+        self.locatorURL = locatorURL
+        self.bookmark = bookmark
+        self.displayName = displayName
+        self.digest = digest
+        self.encoding = encoding
+        self.lineEnding = lineEnding
+    }
+}
+
+public func encodeNewTextFile(text: String) throws -> EncodedTextFile {
+    let normalizedText = text
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+    let data = Data(normalizedText.utf8)
+    guard data.count <= maximumSupportedTextFileByteCount else {
+        throw NewTextFileEncodingError.contentTooLarge(
+            actualByteCount: data.count,
+            maximumByteCount: maximumSupportedTextFileByteCount
+        )
+    }
+    let digest = try FileDigest(bytes: Data(SHA256.hash(data: data)))
+    return EncodedTextFile(
+        text: normalizedText,
+        data: data,
+        digest: digest,
+        encoding: .utf8,
+        lineEnding: .lf
+    )
+}

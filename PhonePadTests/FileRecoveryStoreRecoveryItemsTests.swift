@@ -756,6 +756,282 @@ final class FileRecoveryStoreRecoveryItemsTests: XCTestCase {
         )
     }
 
+    func testCompleteRecoveryAfterSaveTerminatesValidRecovery() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000001")!
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        try await store.save(
+            envelope: RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: documentID,
+                title: "Saved Document",
+                text: "Verified content already saved to the chosen File.",
+                editedAt: Date(timeIntervalSince1970: 1_786_650_000)
+            )
+        )
+
+        try await store.completeRecoveryAfterSave(documentID: documentID)
+
+        let recoveryItems = try await store.recoveryItems()
+        let loadedEnvelope = try await store.load(documentID: documentID)
+        XCTAssertTrue(recoveryItems.isEmpty)
+        XCTAssertNil(loadedEnvelope)
+        XCTAssertTrue(
+            try FileManager.default.contentsOfDirectory(atPath: rootURL.path).isEmpty
+        )
+    }
+
+    func testCompleteRecoveryAfterSaveWithoutRecoveryArtifactIsNoOp() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000002")!
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        try await store.completeRecoveryAfterSave(documentID: documentID)
+
+        let recoveryItems = try await store.recoveryItems()
+        XCTAssertTrue(recoveryItems.isEmpty)
+        XCTAssertTrue(
+            try FileManager.default.contentsOfDirectory(atPath: rootURL.path).isEmpty
+        )
+    }
+
+    func testCompleteRecoveryAfterSaveRetainsCorruptRecoveryAndThrowsTypedFailure() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000003")!
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        let corruptData = Data("corrupt-preserved-work".utf8)
+        try corruptData.write(to: canonicalURL, options: .completeFileProtection)
+        try applyProtectedMetadata(to: canonicalURL)
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected corrupt recovery to block saved cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .couldNotDecodeCheckpoint = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), corruptData)
+        let recoveryItems = try await store.recoveryItems()
+        XCTAssertEqual(
+            recoveryItems,
+            [
+                RecoveryItemSummary(
+                    documentID: documentID,
+                    title: "Recovered Document",
+                    lastEdited: .unavailable,
+                    status: .corrupt
+                )
+            ]
+        )
+    }
+
+    func testCompleteRecoveryAfterSaveRetainsUnsupportedRecoveryAndThrowsTypedFailure() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000004")!
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        let unsupportedData = Data(
+            """
+            {"documentID":{"rawValue":"30500000-0000-0000-0000-000000000004"},"editedAt":0,"formatVersion":42,"text":"retained","title":"Future"}
+            """.utf8
+        )
+        try unsupportedData.write(to: canonicalURL, options: .completeFileProtection)
+        try applyProtectedMetadata(to: canonicalURL)
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected unsupported recovery to block saved cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case let .unsupportedCheckpointVersion(
+                actualDocumentID,
+                expectedVersion,
+                actualVersion,
+                _
+            ) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(actualDocumentID, documentID)
+            XCTAssertEqual(expectedVersion, RecoveryEnvelope.currentFormatVersion)
+            XCTAssertEqual(actualVersion, 42)
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), unsupportedData)
+    }
+
+    func testCompleteRecoveryAfterSaveRetainsUnavailableRecoveryAndThrowsTypedFailure() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000005")!
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        let envelope = RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: documentID,
+            title: "Unavailable Recovery",
+            text: "Protected content must remain available for retry.",
+            editedAt: Date(timeIntervalSince1970: 1_786_650_000)
+        )
+        let envelopeData = try JSONEncoder().encode(envelope)
+        try envelopeData.write(to: canonicalURL, options: .completeFileProtection)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: canonicalURL.path
+        )
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = false
+        var mutableCanonicalURL = canonicalURL
+        try mutableCanonicalURL.setResourceValues(values)
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected unavailable recovery to block saved cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .backupExclusionVerificationFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), envelopeData)
+    }
+
+    func testCompleteRecoveryAfterSaveRetainsSymbolicLinkAndTarget() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000006")!
+        )
+        let targetURL = rootURL.appendingPathComponent(
+            "saved-cleanup-symbolic-link-target",
+            isDirectory: false
+        )
+        let targetData = Data("Target content must remain untouched.".utf8)
+        try targetData.write(to: targetURL, options: .completeFileProtection)
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        try FileManager.default.createSymbolicLink(
+            at: canonicalURL,
+            withDestinationURL: targetURL
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected symbolic-link recovery to block saved cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .recoveryItemHasUnexpectedType = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: targetURL), targetData)
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(
+                atPath: canonicalURL.path
+            ),
+            targetURL.path
+        )
+    }
+
+    func testCompleteRecoveryAfterSaveRetainsUnexpectedDirectoryArtifact() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000008")!
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        try FileManager.default.createDirectory(
+            at: canonicalURL,
+            withIntermediateDirectories: false
+        )
+        let nestedURL = canonicalURL.appendingPathComponent(
+            "retained-private-artifact",
+            isDirectory: false
+        )
+        let nestedData = Data("Unexpected recovery artifact remains untouched.".utf8)
+        try nestedData.write(to: nestedURL)
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected unexpected recovery type to block saved cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .recoveryItemHasUnexpectedType = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: nestedURL), nestedData)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalURL.path))
+    }
+
+    func testCompleteRecoveryAfterSaveRetainsCorruptStagingSidecar() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "30500000-0000-0000-0000-000000000007")!
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        try await store.save(
+            envelope: RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: documentID,
+                title: "Verified Canonical",
+                text: "Canonical content must remain retained.",
+                editedAt: Date(timeIntervalSince1970: 1_786_650_000)
+            )
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        let stagingURL = rootURL.appendingPathComponent(
+            ".30500000-0000-0000-0000-000000000007.recovery.staging",
+            isDirectory: false
+        )
+        let corruptStagingData = Data("corrupt-sidecar".utf8)
+        try corruptStagingData.write(
+            to: stagingURL,
+            options: [.atomic, .completeFileProtection]
+        )
+        try applyProtectedMetadata(to: stagingURL)
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected corrupt staging data to block saved cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .couldNotDecodeCheckpoint = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        XCTAssertEqual(try Data(contentsOf: stagingURL), corruptStagingData)
+    }
+
     func testDiscardRecoveryRemovesCanonicalSymbolicLinkWithoutFollowingTarget() async throws {
         let rootURL = try makeRecoveryRoot()
         let documentID = DocumentID(
@@ -914,6 +1190,93 @@ final class FileRecoveryStoreRecoveryItemsTests: XCTestCase {
         XCTAssertTrue(
             try FileManager.default.contentsOfDirectory(atPath: rootURL.path).isEmpty
         )
+    }
+
+    func testRecoveryItemsCompletesDurableSavedIntentAfterInterruption() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "40500000-0000-0000-0000-000000000001")!
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        try await store.save(
+            envelope: RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: documentID,
+                title: "Saved",
+                text: "Content already committed to the chosen File",
+                editedAt: Date(timeIntervalSince1970: 1_786_650_000)
+            )
+        )
+        let transactionURL = rootURL.appendingPathComponent(
+            ".40500000-0000-0000-0000-000000000001.recovery.transaction",
+            isDirectory: false
+        )
+        let markerData = Data(
+            """
+            {"action":"saved","documentID":{"rawValue":"40500000-0000-0000-0000-000000000001"},"formatVersion":1,"kind":"phonepad.recovery.cleanup"}
+            """.utf8
+        )
+        try markerData.write(
+            to: transactionURL,
+            options: [.atomic, .completeFileProtection]
+        )
+        try applyProtectedMetadata(to: transactionURL)
+
+        let items = try await store.recoveryItems()
+        let recoveredEnvelope = try await store.load(documentID: documentID)
+
+        XCTAssertTrue(items.isEmpty)
+        XCTAssertNil(recoveredEnvelope)
+        XCTAssertTrue(
+            try FileManager.default.contentsOfDirectory(atPath: rootURL.path).isEmpty
+        )
+    }
+
+    func testUnverifiedSavedIntentDoesNotTerminateRecovery() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "40500000-0000-0000-0000-000000000002")!
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        try await store.save(
+            envelope: RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: documentID,
+                title: "Retained",
+                text: "Recovery remains until cleanup intent is verified.",
+                editedAt: Date(timeIntervalSince1970: 1_786_650_000)
+            )
+        )
+        let canonicalURL = canonicalURL(rootURL: rootURL, documentID: documentID)
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        let transactionURL = rootURL.appendingPathComponent(
+            ".40500000-0000-0000-0000-000000000002.recovery.transaction",
+            isDirectory: false
+        )
+        let markerData = Data(
+            """
+            {"action":"saved","documentID":{"rawValue":"40500000-0000-0000-0000-000000000002"},"formatVersion":1,"kind":"phonepad.recovery.cleanup"}
+            """.utf8
+        )
+        try markerData.write(
+            to: transactionURL,
+            options: [.atomic, .completeFileProtection]
+        )
+
+        do {
+            try await store.completeRecoveryAfterSave(documentID: documentID)
+            XCTFail("Expected unverified saved intent to block cleanup.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .backupExclusionVerificationFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        XCTAssertEqual(try Data(contentsOf: transactionURL), markerData)
     }
 
     private func makeRecoveryRoot() throws -> URL {

@@ -144,6 +144,45 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testSaveAsValidatesConfigurationBeforeOpeningFolderPicker() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let actionMenu = app.descendants(matching: .any)["phonepad.action-menu"].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.tap()
+
+        let saveButton = app.buttons["phonepad.action-menu.save"]
+        XCTAssertTrue(saveButton.waitForExistence(timeout: 2))
+        saveButton.tap()
+
+        let saveAsSheet = app.descendants(matching: .any)["phonepad.save-as.sheet"]
+            .firstMatch
+        XCTAssertTrue(saveAsSheet.waitForExistence(timeout: 5))
+        let fileNameField = app.textFields["phonepad.save-as.filename"]
+        XCTAssertTrue(fileNameField.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["phonepad.save-as.encoding"].exists)
+        fileNameField.tap()
+        fileNameField.typeText("/")
+
+        let chooseFolderButton = app.buttons["phonepad.save-as.choose-folder"]
+        XCTAssertTrue(chooseFolderButton.waitForExistence(timeout: 2))
+        chooseFolderButton.tap()
+
+        let validationError = app.staticTexts["phonepad.save-as.validation-error"]
+        XCTAssertTrue(validationError.waitForExistence(timeout: 2))
+        XCTAssertTrue(saveAsSheet.exists)
+
+        let cancelButton = app.buttons["phonepad.save-as.cancel"]
+        XCTAssertTrue(cancelButton.waitForExistence(timeout: 2))
+        cancelButton.tap()
+        XCTAssertFalse(saveAsSheet.exists)
+    }
+
+    @MainActor
     private func waitForCount(
         _ query: XCUIElementQuery,
         count: Int,

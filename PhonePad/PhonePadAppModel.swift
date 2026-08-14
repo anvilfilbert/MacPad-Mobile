@@ -32,6 +32,23 @@ private enum PhonePadRecoveryActionError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadFileSaveActionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+    case cleanupRequired
+    case cleanupNotRequired
+
+    var errorDescription: String? {
+        switch self {
+        case .actionAlreadyInProgress:
+            "Another File action is still running. Wait for it to finish and retry."
+        case .cleanupRequired:
+            "File output is verified, but recovery cleanup is still required. Choose Retry Cleanup before editing or saving again."
+        case .cleanupNotRequired:
+            "No recovery cleanup is waiting. Choose Save to start a new File action."
+        }
+    }
+}
+
 @MainActor
 final class PhonePadAppModel: ObservableObject {
     @Published private(set) var state: PhonePadState
@@ -39,18 +56,25 @@ final class PhonePadAppModel: ObservableObject {
     @Published private(set) var recoveryItems: [RecoveryItemSummary]
     @Published private(set) var recoveryCatalogError: String?
     @Published private(set) var activeRecoveryAction: DocumentID?
+    @Published private(set) var fileSaveError: String?
+    @Published private(set) var fileSaveNotice: String?
+    @Published private(set) var fileSaveInProgress: Bool
+    @Published private(set) var fileSaveCleanupRequired: Bool
 
     private let recoveryStore: FileRecoveryStore
+    private let fileAccessConnector: FileAccessConnector
     private let checkpointQuietPeriod: Duration
     private let checkpointMaximumInterval: Duration
     private let checkpointClock: ContinuousClock
     private var checkpointTask: Task<Void, Never>?
     private var pendingCheckpoint: PendingRecoveryCheckpoint?
+    private var pendingFileSaveCleanup: NewDocumentSaveResult?
     private var editGeneration: UInt64
 
     init(
         state: PhonePadState,
         recoveryStore: FileRecoveryStore,
+        fileAccessConnector: FileAccessConnector,
         checkpointQuietPeriod: Duration,
         checkpointMaximumInterval: Duration
     ) {
@@ -58,6 +82,7 @@ final class PhonePadAppModel: ObservableObject {
         precondition(checkpointMaximumInterval > .zero, "Checkpoint maximum interval must be positive.")
         self.state = state
         self.recoveryStore = recoveryStore
+        self.fileAccessConnector = fileAccessConnector
         self.checkpointQuietPeriod = checkpointQuietPeriod
         self.checkpointMaximumInterval = checkpointMaximumInterval
         checkpointClock = ContinuousClock()
@@ -65,8 +90,28 @@ final class PhonePadAppModel: ObservableObject {
         recoveryItems = []
         recoveryCatalogError = nil
         activeRecoveryAction = nil
+        fileSaveError = nil
+        fileSaveNotice = nil
+        fileSaveInProgress = false
+        fileSaveCleanupRequired = false
         pendingCheckpoint = nil
+        pendingFileSaveCleanup = nil
         editGeneration = 0
+    }
+
+    convenience init(
+        state: PhonePadState,
+        recoveryStore: FileRecoveryStore,
+        checkpointQuietPeriod: Duration,
+        checkpointMaximumInterval: Duration
+    ) {
+        self.init(
+            state: state,
+            recoveryStore: recoveryStore,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: checkpointQuietPeriod,
+            checkpointMaximumInterval: checkpointMaximumInterval
+        )
     }
 
     convenience init(
@@ -96,6 +141,147 @@ final class PhonePadAppModel: ObservableObject {
 
     var activeText: String {
         state.activeTab.document.text
+    }
+
+    var fileMutationDisabled: Bool {
+        fileSaveInProgress || fileSaveCleanupRequired
+    }
+
+    func clearFileSaveFeedback() {
+        guard !fileSaveCleanupRequired else {
+            return
+        }
+        fileSaveError = nil
+        fileSaveNotice = nil
+    }
+
+    func reportFileSaveTransitionError(_ error: Error) {
+        fileSaveError = error.localizedDescription
+        fileSaveNotice = nil
+    }
+
+    func prepareNewDocumentSave(
+        fileName: String,
+        encoding: TextFileEncoding
+    ) throws -> PreparedNewFileSave {
+        guard !fileSaveCleanupRequired else {
+            throw PhonePadFileSaveActionError.cleanupRequired
+        }
+        let preparedSave = try prepareNewFileSave(
+            state: state,
+            fileName: fileName,
+            encoding: encoding,
+            recoveryEditedAt: Date()
+        )
+        clearFileSaveFeedback()
+        return preparedSave
+    }
+
+    @discardableResult
+    func saveNewDocument(
+        preparation: PreparedNewFileSave,
+        selectedFolderURL: URL
+    ) async -> Bool {
+        guard !fileSaveCleanupRequired else {
+            fileSaveError = PhonePadFileSaveActionError
+                .cleanupRequired
+                .localizedDescription
+            return false
+        }
+        guard !fileSaveInProgress else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+
+        fileSaveInProgress = true
+        fileSaveError = nil
+        fileSaveNotice = nil
+        defer { fileSaveInProgress = false }
+
+        await cancelPendingCheckpointForFileSave()
+
+        do {
+            let protectedState = try await protectPreparedNewFileSave(
+                state: state,
+                preparedSave: preparation,
+                recoveryStore: recoveryStore
+            )
+            state = protectedState
+            recoveryError = nil
+
+            let result = try await saveProtectedNewDocument(
+                state: protectedState,
+                preparedSave: preparation,
+                selectedFolderURL: selectedFolderURL,
+                fileAccessConnector: fileAccessConnector,
+                recoveryStore: recoveryStore
+            )
+            state = result.state
+            pendingFileSaveCleanup = nil
+            fileSaveCleanupRequired = false
+            fileSaveError = nil
+            fileSaveNotice = fileSaveNoticeText(result.notice)
+            return true
+        } catch let error as NewDocumentSaveWorkflowError {
+            if case let .outputVerifiedButRecoveryCleanupFailed(
+                result,
+                _
+            ) = error {
+                pendingFileSaveCleanup = result
+                fileSaveCleanupRequired = true
+            }
+            fileSaveError = error.localizedDescription
+            return false
+        } catch {
+            fileSaveError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func retryFileSaveCleanup() async -> Bool {
+        guard !fileSaveInProgress else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard let pendingFileSaveCleanup else {
+            fileSaveError = PhonePadFileSaveActionError
+                .cleanupNotRequired
+                .localizedDescription
+            return false
+        }
+
+        fileSaveInProgress = true
+        fileSaveError = nil
+        defer { fileSaveInProgress = false }
+
+        do {
+            let terminalOutcome = try await recoveryStore.completeRecoveryAfterSave(
+                documentID: pendingFileSaveCleanup.state.activeTab.document.id
+            )
+            let completedResult = applyingRecoveryTerminalOutcome(
+                result: pendingFileSaveCleanup,
+                terminalOutcome: terminalOutcome
+            )
+            state = completedResult.state
+            self.pendingFileSaveCleanup = nil
+            fileSaveCleanupRequired = false
+            fileSaveError = nil
+            fileSaveNotice = fileSaveNoticeText(completedResult.notice)
+            return true
+        } catch {
+            let workflowError = NewDocumentSaveWorkflowError
+                .outputVerifiedButRecoveryCleanupFailed(
+                    result: pendingFileSaveCleanup,
+                    cleanupFailure: RecoveryCleanupFailure(capturing: error)
+                )
+            fileSaveError = workflowError.localizedDescription
+            return false
+        }
     }
 
     func reportRecoveryTransitionError(_ error: Error) {
@@ -178,9 +364,18 @@ final class PhonePadAppModel: ObservableObject {
         defer { activeRecoveryAction = nil }
 
         do {
-            try await recoveryStore.discardRecovery(documentID: documentID)
+            let terminalOutcome = try await recoveryStore.discardRecovery(
+                documentID: documentID
+            )
             recoveryItems.removeAll { $0.documentID == documentID }
             recoveryCatalogError = nil
+            fileSaveError = nil
+            switch terminalOutcome {
+            case .complete:
+                fileSaveNotice = nil
+            case .residualCleanupPending:
+                fileSaveNotice = "Preserved work was discarded. Protected cleanup remains and PhonePad will retry it on next recovery access."
+            }
             return true
         } catch {
             recoveryCatalogError = error.localizedDescription
@@ -189,6 +384,20 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     func editActiveDocument(text: String) {
+        guard !fileSaveCleanupRequired else {
+            if fileSaveError == nil {
+                fileSaveError = PhonePadFileSaveActionError
+                    .cleanupRequired
+                    .localizedDescription
+            }
+            return
+        }
+        guard !fileSaveInProgress else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
         guard text != state.activeTab.document.text else {
             return
         }
@@ -232,6 +441,16 @@ final class PhonePadAppModel: ObservableObject {
         checkpointTask = Task { @MainActor [weak self] in
             await self?.runCheckpointLoop()
         }
+    }
+
+    private func cancelPendingCheckpointForFileSave() async {
+        let activeCheckpointTask = checkpointTask
+        activeCheckpointTask?.cancel()
+        if let activeCheckpointTask {
+            await activeCheckpointTask.value
+        }
+        checkpointTask = nil
+        pendingCheckpoint = nil
     }
 
     private func currentDocumentIsReadyForTransition() async -> Bool {
@@ -307,6 +526,19 @@ final class PhonePadAppModel: ObservableObject {
                 return
             }
             recoveryError = error.localizedDescription
+        }
+    }
+
+    private func fileSaveNoticeText(_ notice: NewDocumentSaveNotice?) -> String? {
+        switch notice {
+        case .none:
+            return nil
+        case .durableFileAccessUnavailable:
+            return "File was saved and verified, but PhonePad could not retain durable access. The Document is clean and detached; its next edit will require Save As."
+        case .recoveryCleanupPending:
+            return "File was saved and verified. The Document is clean. Protected recovery cleanup remains and PhonePad will retry it on next recovery access."
+        case .durableFileAccessUnavailableAndRecoveryCleanupPending:
+            return "File was saved and verified without durable access. The Document is clean and detached. Protected recovery cleanup remains and PhonePad will retry it on next recovery access."
         }
     }
 }

@@ -180,6 +180,63 @@ final class PhonePadAppModelTests: XCTestCase {
         XCTAssertNil(discardedEnvelope)
     }
 
+    func testDiscardResidualCleanupIsNonblockingAndRetriesOnCatalogRefresh() async throws {
+        let rootURL = try makeModelRecoveryRoot()
+        let preservedDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000210")!
+        )
+        let canonicalURL = rootURL.appendingPathComponent(
+            preservedDocumentID.rawValue.uuidString.lowercased() + ".recovery.json",
+            isDirectory: false
+        )
+        let removalGate = DiscardTerminalRemovalGate(failingURL: canonicalURL)
+        let store = FileRecoveryStore(
+            rootURL: rootURL,
+            fileManager: .default,
+            postPromotionValidation: { _ in },
+            terminalArtifactRemoval: { fileManager, url in
+                try removalGate.remove(fileManager: fileManager, url: url)
+            }
+        )
+        try await store.save(
+            envelope: RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: preservedDocumentID,
+                title: "Discard residual",
+                text: "User Content is terminal after marker verification",
+                editedAt: Date(timeIntervalSince1970: 1_760_000_250)
+            )
+        )
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store
+        )
+        await model.refreshRecoveryItems()
+
+        let didDiscard = await model.discardRecovery(
+            documentID: preservedDocumentID
+        )
+
+        XCTAssertTrue(didDiscard)
+        XCTAssertTrue(model.recoveryItems.isEmpty)
+        XCTAssertNil(model.recoveryCatalogError)
+        XCTAssertNotNil(model.fileSaveNotice)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalURL.path))
+        XCTAssertFalse(
+            try Data(contentsOf: canonicalURL)
+                .contains(Data("User Content".utf8))
+        )
+
+        await model.refreshRecoveryItems()
+
+        XCTAssertTrue(model.recoveryItems.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: canonicalURL.path))
+        XCTAssertEqual(removalGate.attemptCount, 2)
+    }
+
     func testRapidEditsCheckpointLatestGenerationWithoutSerializingEveryEdit() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -214,6 +271,290 @@ final class PhonePadAppModelTests: XCTestCase {
         XCTAssertEqual(model.state.activeTab.document.recoveryState, .protectedUnsaved)
     }
 
+    func testSaveNewDocumentForcesLatestCheckpointAndReturnsCleanBoundFile() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let destinationFolderURL = try makeModelRecoveryRoot()
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000206")!
+        )
+        let initialState = makeInitialPhonePadState(
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID())
+        )
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: initialState,
+            newText: "Earlier text",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_400),
+            recoveryStore: store
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        model.editActiveDocument(text: "Latest\r\ntext")
+        let preparation = try model.prepareNewDocumentSave(
+            fileName: "Notes.txt",
+            encoding: .utf8
+        )
+
+        let didSave = await model.saveNewDocument(
+            preparation: preparation,
+            selectedFolderURL: destinationFolderURL
+        )
+
+        XCTAssertTrue(didSave)
+        XCTAssertEqual(model.state.activeTab.document.title, "Notes.txt")
+        XCTAssertEqual(model.state.activeTab.document.text, "Latest\ntext")
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            model.state.activeTab.document.recoveryState,
+            DocumentRecoveryState.clean
+        )
+        XCTAssertNotNil(model.state.activeTab.document.fileBinding)
+        XCTAssertNil(model.fileSaveError)
+        XCTAssertNil(model.fileSaveNotice)
+        XCTAssertFalse(model.fileSaveInProgress)
+        let targetURL = destinationFolderURL.appendingPathComponent(
+            "Notes.txt",
+            isDirectory: false
+        )
+        XCTAssertEqual(try Data(contentsOf: targetURL), Data("Latest\ntext".utf8))
+        let removedRecovery = try await store.load(documentID: documentID)
+        XCTAssertNil(removedRecovery)
+    }
+
+    func testSaveNewDocumentFailureKeepsLatestTextAndRecoveryProtected() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let destinationFolderURL = try makeModelRecoveryRoot()
+        let targetURL = destinationFolderURL.appendingPathComponent(
+            "Existing.txt",
+            isDirectory: false
+        )
+        let originalBytes = Data("Existing content".utf8)
+        try originalBytes.write(to: targetURL, options: .withoutOverwriting)
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000207")!
+        )
+        let initialState = makeInitialPhonePadState(
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID())
+        )
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: initialState,
+            newText: "Earlier text",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_500),
+            recoveryStore: store
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        model.editActiveDocument(text: "Latest protected text")
+        let preparation = try model.prepareNewDocumentSave(
+            fileName: "Existing.txt",
+            encoding: .utf8
+        )
+
+        let didSave = await model.saveNewDocument(
+            preparation: preparation,
+            selectedFolderURL: destinationFolderURL
+        )
+
+        XCTAssertFalse(didSave)
+        XCTAssertEqual(model.state.activeTab.document.text, "Latest protected text")
+        XCTAssertTrue(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            model.state.activeTab.document.recoveryState,
+            DocumentRecoveryState.protectedUnsaved
+        )
+        XCTAssertNil(model.state.activeTab.document.fileBinding)
+        XCTAssertNotNil(model.fileSaveError)
+        XCTAssertNil(model.fileSaveNotice)
+        XCTAssertFalse(model.fileSaveInProgress)
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalBytes)
+        let envelope = try await store.load(documentID: documentID)
+        XCTAssertEqual(envelope?.text, "Latest protected text")
+    }
+
+    func testVerifiedSaveCleanupFailureBlocksMutationUntilRetrySucceeds() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let destinationFolderURL = try makeModelRecoveryRoot()
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000208")!
+        )
+        let initialState = makeInitialPhonePadState(
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID())
+        )
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: initialState,
+            newText: "Protected text",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_600),
+            recoveryStore: store
+        )
+        let recoveryArtifactURL = recoveryRootURL.appendingPathComponent(
+            documentID.rawValue.uuidString.lowercased() + ".recovery.json",
+            isDirectory: false
+        )
+        let loadedRecoveryEnvelope = try await store.load(documentID: documentID)
+        let recoveryEnvelope = try XCTUnwrap(loadedRecoveryEnvelope)
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: { targetURL in
+                try Data("corrupt recovery".utf8).write(
+                    to: recoveryArtifactURL,
+                    options: .atomic
+                )
+                return try targetURL.bookmarkData(
+                    options: [],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+            }
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: connector,
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        let preparation = try model.prepareNewDocumentSave(
+            fileName: "Verified.txt",
+            encoding: .utf8
+        )
+
+        let didSave = await model.saveNewDocument(
+            preparation: preparation,
+            selectedFolderURL: destinationFolderURL
+        )
+
+        XCTAssertFalse(didSave)
+        XCTAssertTrue(model.fileSaveCleanupRequired)
+        XCTAssertTrue(model.fileMutationDisabled)
+        let cleanupError = try XCTUnwrap(model.fileSaveError)
+        XCTAssertTrue(cleanupError.contains("Retry Cleanup"))
+        XCTAssertTrue(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(model.state.activeTab.document.recoveryState, .protectedUnsaved)
+        XCTAssertNil(model.state.activeTab.document.fileBinding)
+        XCTAssertEqual(
+            try Data(
+                contentsOf: destinationFolderURL.appendingPathComponent(
+                    "Verified.txt",
+                    isDirectory: false
+                )
+            ),
+            Data("Protected text".utf8)
+        )
+
+        model.editActiveDocument(text: "Blocked mutation")
+        model.clearFileSaveFeedback()
+
+        XCTAssertEqual(model.activeText, "Protected text")
+        XCTAssertTrue(model.fileSaveCleanupRequired)
+        XCTAssertEqual(model.fileSaveError, cleanupError)
+
+        let failedRetry = await model.retryFileSaveCleanup()
+
+        XCTAssertFalse(failedRetry)
+        XCTAssertTrue(model.fileSaveCleanupRequired)
+        XCTAssertTrue(model.fileMutationDisabled)
+        XCTAssertTrue(model.state.activeTab.document.isUnsaved)
+
+        try FileManager.default.removeItem(at: recoveryArtifactURL)
+        try await store.save(envelope: recoveryEnvelope)
+
+        let didRetry = await model.retryFileSaveCleanup()
+
+        XCTAssertTrue(didRetry)
+        XCTAssertFalse(model.fileSaveCleanupRequired)
+        XCTAssertFalse(model.fileMutationDisabled)
+        XCTAssertNil(model.fileSaveError)
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(model.state.activeTab.document.recoveryState, .clean)
+        XCTAssertNotNil(model.state.activeTab.document.fileBinding)
+        let remainingRecovery = try await store.load(documentID: documentID)
+        XCTAssertNil(remainingRecovery)
+    }
+
+    func testEditDuringInFlightSaveIsRejectedWithVisibleTypedError() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let destinationFolderURL = try makeModelRecoveryRoot()
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000209")!
+        )
+        let initialState = makeInitialPhonePadState(
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID())
+        )
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: initialState,
+            newText: "Protected before Save",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_700),
+            recoveryStore: store
+        )
+        let gate = BlockingBookmarkGate()
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: { targetURL in
+                try gate.createBookmark(afterEnteringFor: targetURL)
+            }
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: connector,
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        let preparation = try model.prepareNewDocumentSave(
+            fileName: "InFlight.txt",
+            encoding: .utf8
+        )
+
+        let saveTask = Task { @MainActor in
+            await model.saveNewDocument(
+                preparation: preparation,
+                selectedFolderURL: destinationFolderURL
+            )
+        }
+        await gate.waitUntilEntered()
+
+        model.editActiveDocument(text: "Must be rejected")
+
+        XCTAssertTrue(model.fileSaveInProgress)
+        XCTAssertEqual(model.activeText, "Protected before Save")
+        let actionError = try XCTUnwrap(model.fileSaveError)
+        XCTAssertTrue(actionError.localizedCaseInsensitiveContains("still running"))
+
+        gate.resume()
+        let didSave = await saveTask.value
+
+        XCTAssertTrue(didSave)
+        XCTAssertFalse(model.fileSaveInProgress)
+        XCTAssertNil(model.fileSaveError)
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            try Data(
+                contentsOf: destinationFolderURL.appendingPathComponent(
+                    "InFlight.txt",
+                    isDirectory: false
+                )
+            ),
+            Data("Protected before Save".utf8)
+        )
+    }
+
     private func makeModelRecoveryRoot() throws -> URL {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -226,5 +567,83 @@ final class PhonePadAppModelTests: XCTestCase {
             try FileManager.default.removeItem(at: rootURL)
         }
         return rootURL
+    }
+}
+
+private final class BlockingBookmarkGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private var didEnter: Bool = false
+    private var entryContinuation: CheckedContinuation<Void, Never>?
+
+    func createBookmark(afterEnteringFor url: URL) throws -> Data {
+        let continuation = lock.withLock {
+            didEnter = true
+            let continuation = entryContinuation
+            entryContinuation = nil
+            return continuation
+        }
+        continuation?.resume()
+        release.wait()
+        return try url.bookmarkData(
+            options: [],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    func waitUntilEntered() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock {
+                if didEnter {
+                    return true
+                }
+                precondition(entryContinuation == nil)
+                entryContinuation = continuation
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+
+    func resume() {
+        release.signal()
+    }
+}
+
+private final class DiscardTerminalRemovalGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let failingURL: URL
+    private var remainingFailures: Int
+    private var recordedAttemptCount: Int
+
+    init(failingURL: URL) {
+        self.failingURL = failingURL.standardizedFileURL
+        remainingFailures = 1
+        recordedAttemptCount = 0
+    }
+
+    var attemptCount: Int {
+        lock.withLock { recordedAttemptCount }
+    }
+
+    func remove(fileManager: FileManager, url: URL) throws {
+        let shouldFail = lock.withLock {
+            guard url.standardizedFileURL == failingURL else {
+                return false
+            }
+            recordedAttemptCount += 1
+            guard remainingFailures > 0 else {
+                return false
+            }
+            remainingFailures -= 1
+            return true
+        }
+        if shouldFail {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try fileManager.removeItem(at: url)
     }
 }

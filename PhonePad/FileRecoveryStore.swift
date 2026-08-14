@@ -47,6 +47,7 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
     case couldNotEncodeCleanupMarker(DocumentID, String)
     case couldNotWriteCleanupMarker(DocumentID, URL, String)
     case cleanupMarkerContentMismatch(DocumentID, URL)
+    case terminalCleanupBlocksCheckpoint(DocumentID)
 
     public var errorDescription: String? {
         switch self {
@@ -123,26 +124,31 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
         case .couldNotEnumerateRecovery:
             "Could not inspect preserved work. Check available device storage and retry Document Recovery."
         case let .couldNotEncodeCleanupMarker(documentID, _):
-            "Could not prepare Discard Recovery for document \(documentID.rawValue). Preserved work remains available; retry."
+            "Could not prepare recovery cleanup for document \(documentID.rawValue). Preserved work remains available; retry."
         case let .couldNotWriteCleanupMarker(documentID, _, _):
-            "Could not record Discard Recovery for document \(documentID.rawValue). Preserved work remains available; retry."
+            "Could not record recovery cleanup for document \(documentID.rawValue). Preserved work remains available; retry."
         case let .cleanupMarkerContentMismatch(documentID, _):
-            "Discard Recovery for document \(documentID.rawValue) could not be verified. Preserved work remains available; retry."
+            "Recovery cleanup for document \(documentID.rawValue) could not be verified. Preserved work remains available; retry."
+        case let .terminalCleanupBlocksCheckpoint(documentID):
+            "Protected recovery cleanup for document \(documentID.rawValue) remains pending. No new checkpoint was created; retry recovery cleanup before editing."
         }
     }
 }
 
 public actor FileRecoveryStore: RecoveryStoring {
     typealias PostPromotionValidation = @Sendable (URL) throws -> Void
+    typealias TerminalArtifactRemoval = @Sendable (FileManager, URL) throws -> Void
 
     private let rootURL: URL
     private let fileManager: FileManager
     private let postPromotionValidation: PostPromotionValidation
+    private let terminalArtifactRemoval: TerminalArtifactRemoval
 
     public init(rootURL: URL, fileManager: FileManager) {
         self.rootURL = rootURL
         self.fileManager = fileManager
         postPromotionValidation = { _ in }
+        terminalArtifactRemoval = removeTerminalArtifact
     }
 
     init(
@@ -153,13 +159,34 @@ public actor FileRecoveryStore: RecoveryStoring {
         self.rootURL = rootURL
         self.fileManager = fileManager
         self.postPromotionValidation = postPromotionValidation
+        terminalArtifactRemoval = removeTerminalArtifact
+    }
+
+    init(
+        rootURL: URL,
+        fileManager: FileManager,
+        postPromotionValidation: @escaping PostPromotionValidation,
+        terminalArtifactRemoval: @escaping TerminalArtifactRemoval
+    ) {
+        self.rootURL = rootURL
+        self.fileManager = fileManager
+        self.postPromotionValidation = postPromotionValidation
+        self.terminalArtifactRemoval = terminalArtifactRemoval
     }
 
     public func save(envelope: RecoveryEnvelope) async throws {
         try prepareRecoveryDirectory()
 
         let paths = transactionPaths(documentID: envelope.documentID)
-        try reconcile(documentID: envelope.documentID, paths: paths)
+        let terminalOutcome = try reconcile(
+            documentID: envelope.documentID,
+            paths: paths
+        )
+        guard terminalOutcome != .residualCleanupPending else {
+            throw FileRecoveryStoreError.terminalCleanupBlocksCheckpoint(
+                envelope.documentID
+            )
+        }
 
         let protectedEnvelope = recoveryEnvelopeForUse(envelope)
         try validateEnvelopeBounds(envelope: protectedEnvelope, url: paths.staging)
@@ -256,7 +283,9 @@ public actor FileRecoveryStore: RecoveryStoring {
     public func load(documentID: DocumentID) async throws -> RecoveryEnvelope? {
         try prepareRecoveryDirectory()
         let paths = transactionPaths(documentID: documentID)
-        try reconcile(documentID: documentID, paths: paths)
+        if try reconcile(documentID: documentID, paths: paths) != nil {
+            return nil
+        }
         guard try recoveryArtifactExists(documentID: documentID, url: paths.canonical) else {
             return nil
         }
@@ -278,7 +307,9 @@ public actor FileRecoveryStore: RecoveryStoring {
     ) async throws -> RecoveryCheckpointVerification {
         try prepareRecoveryDirectory()
         let paths = transactionPaths(documentID: documentID)
-        try reconcile(documentID: documentID, paths: paths)
+        if try reconcile(documentID: documentID, paths: paths) != nil {
+            throw FileRecoveryStoreError.checkpointNotFound(documentID, paths.canonical)
+        }
         guard try recoveryArtifactExists(documentID: documentID, url: paths.canonical) else {
             throw FileRecoveryStoreError.checkpointNotFound(documentID, paths.canonical)
         }
@@ -308,7 +339,9 @@ public actor FileRecoveryStore: RecoveryStoring {
         for documentID in documentIDs {
             let paths = transactionPaths(documentID: documentID)
             do {
-                try reconcile(documentID: documentID, paths: paths)
+                if try reconcile(documentID: documentID, paths: paths) != nil {
+                    continue
+                }
                 guard try recoveryArtifactExists(
                     documentID: documentID,
                     url: paths.canonical
@@ -347,12 +380,20 @@ public actor FileRecoveryStore: RecoveryStoring {
         return items.sorted(by: recoverySummaryComesBefore)
     }
 
-    public func discardRecovery(documentID: DocumentID) async throws {
+    @discardableResult
+    public func discardRecovery(
+        documentID: DocumentID
+    ) async throws -> RecoveryTerminalOutcome {
         try prepareRecoveryDirectory()
         let paths = transactionPaths(documentID: documentID)
 
         do {
-            try reconcile(documentID: documentID, paths: paths)
+            if let terminalOutcome = try reconcile(
+                documentID: documentID,
+                paths: paths
+            ) {
+                return terminalOutcome
+            }
         } catch let error as FileRecoveryStoreError {
             guard recoveryFailureSummary(error: error, documentID: documentID) != nil else {
                 throw error
@@ -368,21 +409,109 @@ public actor FileRecoveryStore: RecoveryStoring {
             try recoveryArtifactExists(documentID: documentID, url: $0)
         }
         guard hasRecoveryArtifact else {
-            return
+            return .complete
         }
 
-        let marker = RecoveryCleanupMarker(documentID: documentID)
+        let marker = RecoveryCleanupMarker(
+            documentID: documentID,
+            action: .discard
+        )
         let markerData = try encodeCleanupMarker(marker)
         try writeProtectedCleanupMarker(
             marker: marker,
             data: markerData,
             url: paths.transaction
         )
-        try finishDiscardRecovery(
+        return try finishTerminalRecovery(
             marker: marker,
             markerData: markerData,
             paths: paths
         )
+    }
+
+    @discardableResult
+    public func completeRecoveryAfterSave(
+        documentID: DocumentID
+    ) async throws -> RecoveryTerminalOutcome {
+        try prepareRecoveryDirectory()
+        let paths = transactionPaths(documentID: documentID)
+        if let terminalOutcome = try finishVerifiedCleanupMarkerIfPresent(
+            documentID: documentID,
+            paths: paths
+        ) {
+            return terminalOutcome
+        }
+        try verifyRecoveryArtifactsForSavedCompletion(
+            documentID: documentID,
+            paths: paths
+        )
+        if let terminalOutcome = try reconcile(
+            documentID: documentID,
+            paths: paths
+        ) {
+            return terminalOutcome
+        }
+        guard try recoveryArtifactExists(
+            documentID: documentID,
+            url: paths.canonical
+        ) else {
+            return .complete
+        }
+
+        _ = try readVerifiedEnvelope(documentID: documentID, url: paths.canonical)
+        let marker = RecoveryCleanupMarker(
+            documentID: documentID,
+            action: .saved
+        )
+        let markerData = try encodeCleanupMarker(marker)
+        try writeProtectedCleanupMarker(
+            marker: marker,
+            data: markerData,
+            url: paths.transaction
+        )
+        return try finishTerminalRecovery(
+            marker: marker,
+            markerData: markerData,
+            paths: paths
+        )
+    }
+
+    private func finishVerifiedCleanupMarkerIfPresent(
+        documentID: DocumentID,
+        paths: RecoveryTransactionPaths
+    ) throws -> RecoveryTerminalOutcome? {
+        for url in [paths.canonical, paths.transaction] {
+            guard let marker = try readCleanupMarkerIfPresent(
+                documentID: documentID,
+                url: url
+            ) else {
+                continue
+            }
+            let markerData = try encodeCleanupMarker(marker)
+            return try finishTerminalRecovery(
+                marker: marker,
+                markerData: markerData,
+                paths: paths
+            )
+        }
+        return nil
+    }
+
+    private func verifyRecoveryArtifactsForSavedCompletion(
+        documentID: DocumentID,
+        paths: RecoveryTransactionPaths
+    ) throws {
+        for url in [
+            paths.canonical,
+            paths.staging,
+            paths.transaction,
+            paths.previous,
+        ] {
+            guard try recoveryArtifactExists(documentID: documentID, url: url) else {
+                continue
+            }
+            _ = try readVerifiedEnvelope(documentID: documentID, url: url)
+        }
     }
 
     private func prepareRecoveryDirectory() throws {
@@ -453,11 +582,11 @@ public actor FileRecoveryStore: RecoveryStoring {
         try verifyCleanupMarker(marker: marker, url: url)
     }
 
-    private func finishDiscardRecovery(
+    private func finishTerminalRecovery(
         marker: RecoveryCleanupMarker,
         markerData: Data,
         paths: RecoveryTransactionPaths
-    ) throws {
+    ) throws -> RecoveryTerminalOutcome {
         let canonicalMarker = try readableCleanupMarkerIfPresent(
             documentID: marker.documentID,
             url: paths.canonical
@@ -494,10 +623,41 @@ public actor FileRecoveryStore: RecoveryStoring {
             marker: marker,
             url: paths.canonical
         )
-        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.staging)
-        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.previous)
-        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.transaction)
-        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.canonical)
+        let sidecarsRemoved = [
+            paths.staging,
+            paths.previous,
+            paths.transaction,
+        ].map { url in
+            removeTerminalArtifactIfPresent(
+                documentID: marker.documentID,
+                url: url
+            )
+        }
+        guard sidecarsRemoved.allSatisfy({ $0 }) else {
+            return .residualCleanupPending
+        }
+        guard removeTerminalArtifactIfPresent(
+            documentID: marker.documentID,
+            url: paths.canonical
+        ) else {
+            return .residualCleanupPending
+        }
+        return .complete
+    }
+
+    private func removeTerminalArtifactIfPresent(
+        documentID: DocumentID,
+        url: URL
+    ) -> Bool {
+        do {
+            guard try recoveryArtifactExists(documentID: documentID, url: url) else {
+                return true
+            }
+            try terminalArtifactRemoval(fileManager, url)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func readCleanupMarkerIfPresent(
@@ -530,9 +690,10 @@ public actor FileRecoveryStore: RecoveryStoring {
             return nil
         }
         guard marker.documentID == documentID,
-              marker.isCurrentDiscard else {
+              marker.isCurrent else {
             return nil
         }
+        try verifyCleanupMarker(marker: marker, url: url)
         return marker
     }
 
@@ -739,7 +900,7 @@ public actor FileRecoveryStore: RecoveryStoring {
     private func reconcile(
         documentID: DocumentID,
         paths: RecoveryTransactionPaths
-    ) throws {
+    ) throws -> RecoveryTerminalOutcome? {
         let hasTransaction = try recoveryArtifactExists(
             documentID: documentID,
             url: paths.transaction
@@ -753,32 +914,30 @@ public actor FileRecoveryStore: RecoveryStoring {
             url: paths.canonical
         )
 
-        if hasTransaction,
-           let marker = try readCleanupMarkerIfPresent(
-               documentID: documentID,
-               url: paths.transaction
-           ) {
-            let markerData = try encodeCleanupMarker(marker)
-            try finishDiscardRecovery(
-                marker: marker,
-                markerData: markerData,
-                paths: paths
-            )
-            return
-        }
-
         if hasCanonical,
            let marker = try readCleanupMarkerIfPresent(
                documentID: documentID,
                url: paths.canonical
-           ) {
+            ) {
             let markerData = try encodeCleanupMarker(marker)
-            try finishDiscardRecovery(
+            return try finishTerminalRecovery(
                 marker: marker,
                 markerData: markerData,
                 paths: paths
             )
-            return
+        }
+
+        if hasTransaction,
+           let marker = try readCleanupMarkerIfPresent(
+               documentID: documentID,
+               url: paths.transaction
+            ) {
+            let markerData = try encodeCleanupMarker(marker)
+            return try finishTerminalRecovery(
+                marker: marker,
+                markerData: markerData,
+                paths: paths
+            )
         }
 
         if hasTransaction {
@@ -833,7 +992,7 @@ public actor FileRecoveryStore: RecoveryStoring {
                     )
                 }
             }
-            return
+            return nil
         }
 
         if hasCanonical {
@@ -847,7 +1006,7 @@ public actor FileRecoveryStore: RecoveryStoring {
             }
             try removeArtifactIfPresent(documentID: documentID, url: paths.staging)
             try removeArtifactIfPresent(documentID: documentID, url: paths.previous)
-            return
+            return nil
         }
 
         if hasPrevious {
@@ -861,10 +1020,11 @@ public actor FileRecoveryStore: RecoveryStoring {
                 previousGeneration: previousGeneration,
                 originalFailure: FileRecoveryInterruption.missingCanonical
             )
-            return
+            return nil
         }
 
         try removeArtifactIfPresent(documentID: documentID, url: paths.staging)
+        return nil
     }
 
     private func readVerifiedEnvelope(
@@ -1217,25 +1377,28 @@ private struct RecoveryTransactionPaths {
 private struct RecoveryCleanupMarker: Codable, Equatable {
     static let currentFormatVersion: UInt = 1
     static let expectedKind = "phonepad.recovery.cleanup"
-    static let discardAction = "discard"
 
     let formatVersion: UInt
     let kind: String
     let documentID: DocumentID
-    let action: String
+    let action: RecoveryCleanupAction
 
-    var isCurrentDiscard: Bool {
+    var isCurrent: Bool {
         formatVersion == Self.currentFormatVersion
             && kind == Self.expectedKind
-            && action == Self.discardAction
     }
 
-    init(documentID: DocumentID) {
+    init(documentID: DocumentID, action: RecoveryCleanupAction) {
         formatVersion = Self.currentFormatVersion
         kind = Self.expectedKind
         self.documentID = documentID
-        action = Self.discardAction
+        self.action = action
     }
+}
+
+private enum RecoveryCleanupAction: String, Codable {
+    case discard
+    case saved
 }
 
 private struct RecoveryFormatHeader: Decodable {
@@ -1388,4 +1551,11 @@ private func recoverySummaryComesBefore(
     }
     return left.documentID.rawValue.uuidString
         < right.documentID.rawValue.uuidString
+}
+
+private func removeTerminalArtifact(
+    fileManager: FileManager,
+    url: URL
+) throws {
+    try fileManager.removeItem(at: url)
 }
