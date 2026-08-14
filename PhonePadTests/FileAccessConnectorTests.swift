@@ -1,5 +1,7 @@
 import CryptoKit
+import Darwin
 import Foundation
+import UniformTypeIdentifiers
 import XCTest
 @testable import PhonePad
 import PhonePadCore
@@ -232,14 +234,14 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: childURL), Data("nested data".utf8))
     }
 
-    func testOpenUTF8FileReadsExactBytesAndReturnsDurableBinding() async throws {
+    func testOpenTextFileReadsExactBytesAndReturnsDurableBinding() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Opened.txt", isDirectory: false)
         let bytes = Data("First line\nSecond line\n".utf8)
         try bytes.write(to: fileURL, options: .withoutOverwriting)
         let connector = FileAccessConnector(fileManager: .default)
 
-        let openedFile = try await connector.openUTF8File(at: fileURL)
+        let openedFile = try await connector.openTextFile(at: fileURL)
 
         XCTAssertEqual(openedFile.text, "First line\nSecond line\n")
         XCTAssertEqual(openedFile.binding.locatorURL.standardizedFileURL, fileURL.standardizedFileURL)
@@ -260,23 +262,157 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
     }
 
-    func testOpenUTF8FileRejectsInvalidUTF8WithoutChangingBytes() async throws {
+    func testOpenTextFileDecodesUTF16LEAndRetainsExactBaselineMetadata() async throws {
         let folderURL = try makeTemporaryFolder()
-        let fileURL = folderURL.appendingPathComponent("Invalid.txt", isDirectory: false)
-        let bytes = Data([0xf0, 0x28, 0x8c, 0x28])
+        let fileURL = folderURL.appendingPathComponent("Windows.txt", isDirectory: false)
+        let bytes = Data([
+            0xff, 0xfe,
+            0x41, 0x00, 0x0d, 0x00, 0x0a, 0x00,
+            0xac, 0x20, 0x0d, 0x00, 0x0a, 0x00,
+        ])
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let openedFile = try await connector.openTextFile(at: fileURL)
+
+        XCTAssertEqual(openedFile.text, "A\n€\n")
+        XCTAssertEqual(openedFile.binding.digest, try digest(data: bytes))
+        XCTAssertEqual(openedFile.binding.encoding, .utf16LittleEndianWithBOM)
+        XCTAssertEqual(openedFile.binding.lineEnding, .crlf)
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+    }
+
+    func testOpenTextFileRejectsExplicitRTFTypeBeforeByteDecoding() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("Formatted.rtf", isDirectory: false)
+        let bytes = Data("Ordinary ASCII that would otherwise decode".utf8)
         try bytes.write(to: fileURL, options: .withoutOverwriting)
         let connector = FileAccessConnector(fileManager: .default)
 
         await assertOpenFails(
             connector: connector,
             fileURL: fileURL,
-            expectedError: .inputIsNotUTF8
+            expectedError: .selectedFileHasUnsupportedContentType(UTType.rtf.identifier)
         )
 
         XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
     }
 
-    func testOpenUTF8FileRejectsOversizedFileWithoutReadingItAsText() async throws {
+    func testOpenTextFileAcceptsExtensionlessAndGenericDataAfterByteValidation() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let extensionlessURL = folderURL.appendingPathComponent(
+            "Extensionless",
+            isDirectory: false
+        )
+        let genericDataURL = folderURL.appendingPathComponent(
+            "Generic.dat",
+            isDirectory: false
+        )
+        let bytes = Data("Validated generic text\n".utf8)
+        try bytes.write(to: extensionlessURL, options: .withoutOverwriting)
+        try bytes.write(to: genericDataURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let extensionless = try await connector.openTextFile(at: extensionlessURL)
+        let genericData = try await connector.openTextFile(at: genericDataURL)
+
+        XCTAssertEqual(extensionless.text, "Validated generic text\n")
+        XCTAssertEqual(genericData.text, "Validated generic text\n")
+        XCTAssertEqual(extensionless.binding.digest, try digest(data: bytes))
+        XCTAssertEqual(genericData.binding.digest, try digest(data: bytes))
+    }
+
+    func testOpenTextFileAcceptsValidatedTextIndependentOfImageExtension() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("Image.png", isDirectory: false)
+        let bytes = Data("ASCII bytes are not enough to override an explicit image type".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let openedFile = try await connector.openTextFile(at: fileURL)
+
+        XCTAssertEqual(openedFile.text, String(decoding: bytes, as: UTF8.self))
+        XCTAssertEqual(openedFile.binding.encoding, .utf8)
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+    }
+
+    func testOpenTextFileRejectsPackageBeforeInspectingItsContents() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let packageURL = folderURL.appendingPathComponent("Document.rtfd", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: packageURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let contentURL = packageURL.appendingPathComponent("TXT.rtf", isDirectory: false)
+        try Data("Package content".utf8).write(
+            to: contentURL,
+            options: .withoutOverwriting
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+
+        await assertOpenFails(
+            connector: connector,
+            fileURL: packageURL,
+            expectedError: .selectedFileIsPackage
+        )
+
+        XCTAssertEqual(try Data(contentsOf: contentURL), Data("Package content".utf8))
+    }
+
+    func testOpenTextFileRejectsBinarySignatureDespitePlainTextType() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("Disguised.txt", isDirectory: false)
+        let bytes = Data([
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0x41, 0x42, 0x43,
+        ])
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        await assertOpenFails(
+            connector: connector,
+            fileURL: fileURL,
+            expectedError: .textDecodingFailed(
+                .unsupportedContent(.rasterImage)
+            )
+        )
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+    }
+
+    func testOpenTextFileRejectsUTF32MarkerFromExtensionlessData() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("UTF32", isDirectory: false)
+        let bytes = Data([0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0x41])
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        await assertOpenFails(
+            connector: connector,
+            fileURL: fileURL,
+            expectedError: .textDecodingFailed(.unsupportedContent(.utf32))
+        )
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+    }
+
+    func testOpenTextFileFallsBackFromInvalidUTF8ToWindows1252() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("Legacy.txt", isDirectory: false)
+        let bytes = Data([0x80, 0x20, 0x41])
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let openedFile = try await connector.openTextFile(at: fileURL)
+
+        XCTAssertEqual(openedFile.text, "€ A")
+        XCTAssertEqual(openedFile.binding.encoding, .windows1252)
+        XCTAssertEqual(openedFile.binding.digest, try digest(data: bytes))
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+    }
+
+    func testOpenTextFileRejectsOversizedFileWithoutReadingItAsText() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Oversized.txt", isDirectory: false)
         let bytes = Data(
@@ -301,11 +437,12 @@ final class FileAccessConnectorTests: XCTestCase {
         )
     }
 
-    func testOpenUTF8FileRejectsDirectorySymbolicLinkAndMissingItem() async throws {
+    func testOpenTextFileRejectsDirectorySymbolicLinkAndMissingItem() async throws {
         let folderURL = try makeTemporaryFolder()
         let directoryURL = folderURL.appendingPathComponent("Directory.txt", isDirectory: true)
         let destinationURL = folderURL.appendingPathComponent("Destination.txt", isDirectory: false)
         let symbolicLinkURL = folderURL.appendingPathComponent("Link.txt", isDirectory: false)
+        let specialURL = folderURL.appendingPathComponent("Pipe.txt", isDirectory: false)
         let missingURL = folderURL.appendingPathComponent("Missing.txt", isDirectory: false)
         try FileManager.default.createDirectory(
             at: directoryURL,
@@ -317,6 +454,10 @@ final class FileAccessConnectorTests: XCTestCase {
             at: symbolicLinkURL,
             withDestinationURL: destinationURL
         )
+        let specialCreationResult = specialURL.path.withCString { path in
+            mkfifo(path, mode_t(S_IRUSR | S_IWUSR))
+        }
+        XCTAssertEqual(specialCreationResult, 0)
         let connector = FileAccessConnector(fileManager: .default)
 
         await assertOpenFails(
@@ -331,6 +472,11 @@ final class FileAccessConnectorTests: XCTestCase {
         )
         await assertOpenFails(
             connector: connector,
+            fileURL: specialURL,
+            expectedError: .selectedFileIsNotRegularFile(.special)
+        )
+        await assertOpenFails(
+            connector: connector,
             fileURL: missingURL,
             expectedError: .selectedFileMissing
         )
@@ -338,18 +484,18 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destinationURL), Data("destination".utf8))
     }
 
-    func testSaveUTF8FileReplacesOriginalOnlyOnExplicitCallAndReturnsVerifiedBinding() async throws {
+    func testSaveTextFileReplacesOriginalOnlyOnExplicitCallAndReturnsVerifiedBinding() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Bound.txt", isDirectory: false)
         let originalBytes = Data("Original\n".utf8)
         try originalBytes.write(to: fileURL, options: .withoutOverwriting)
         let connector = FileAccessConnector(fileManager: .default)
-        let openedFile = try await connector.openUTF8File(at: fileURL)
+        let openedFile = try await connector.openTextFile(at: fileURL)
         let encodedFile = try encodeNewTextFile(text: "Edited\r\ncontent\n")
 
         XCTAssertEqual(try Data(contentsOf: fileURL), originalBytes)
 
-        let outcome = try await connector.saveUTF8File(
+        let outcome = try await connector.saveTextFile(
             binding: openedFile.binding,
             encodedFile: encodedFile
         )
@@ -364,12 +510,49 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try folderItemNames(folderURL: folderURL), ["Bound.txt"])
     }
 
-    func testSaveUTF8FileBlocksExternalContentMutationWithoutOverwritingIt() async throws {
+    func testSaveTextFileWritesExactOpenedEncodingAndLineEndingBytes() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("Preserved.txt", isDirectory: false)
+        let originalBytes = Data([
+            0xff, 0xfe,
+            0x41, 0x00, 0x0d, 0x00, 0x0a, 0x00,
+        ])
+        let expectedBytes = Data([
+            0xff, 0xfe,
+            0x42, 0x00, 0x0d, 0x00, 0x0a, 0x00,
+            0xac, 0x20, 0x0d, 0x00, 0x0a, 0x00,
+        ])
+        try originalBytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+        let openedFile = try await connector.openTextFile(at: fileURL)
+        let encodedFile = try encodeTextFile(
+            text: "B\n€\n",
+            encoding: openedFile.binding.encoding,
+            lineEnding: openedFile.binding.lineEnding
+        )
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), originalBytes)
+
+        let outcome = try await connector.saveTextFile(
+            binding: openedFile.binding,
+            encodedFile: encodedFile
+        )
+
+        guard case let .bound(savedBinding) = outcome else {
+            return XCTFail("Expected durable saved binding, received \(outcome).")
+        }
+        XCTAssertEqual(try Data(contentsOf: fileURL), expectedBytes)
+        XCTAssertEqual(savedBinding.encoding, .utf16LittleEndianWithBOM)
+        XCTAssertEqual(savedBinding.lineEnding, .crlf)
+        XCTAssertEqual(savedBinding.digest, try digest(data: expectedBytes))
+    }
+
+    func testSaveTextFileBlocksExternalContentMutationWithoutOverwritingIt() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Conflict.txt", isDirectory: false)
         try Data("Original\n".utf8).write(to: fileURL, options: .withoutOverwriting)
         let connector = FileAccessConnector(fileManager: .default)
-        let openedFile = try await connector.openUTF8File(at: fileURL)
+        let openedFile = try await connector.openTextFile(at: fileURL)
         let externalBytes = Data("External change\n".utf8)
         try externalBytes.write(to: fileURL, options: .atomic)
 
@@ -383,7 +566,7 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fileURL), externalBytes)
     }
 
-    func testSaveUTF8FileBlocksStableIdentityChangeEvenWhenDigestMatches() async throws {
+    func testSaveTextFileBlocksStableIdentityChangeEvenWhenDigestMatches() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Identity.txt", isDirectory: false)
         let bytes = Data("Same bytes\n".utf8)
@@ -416,7 +599,7 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
     }
 
-    func testSaveUTF8FileReportsDeletedDirectoryAndSymbolicLinkTargetsWithoutWriting() async throws {
+    func testSaveTextFileReportsDeletedDirectoryAndSymbolicLinkTargetsWithoutWriting() async throws {
         let replacementCases: [(ExistingFileSystemItemKind?, FileAccessConnectorError)] = [
             (nil, .boundFileMissing),
             (.directory, .boundFileIsNotRegularFile(.directory)),
@@ -429,7 +612,7 @@ final class FileAccessConnectorTests: XCTestCase {
             let destinationURL = folderURL.appendingPathComponent(UUID().uuidString, isDirectory: false)
             try Data("Original\n".utf8).write(to: fileURL, options: .withoutOverwriting)
             let connector = FileAccessConnector(fileManager: .default)
-            let openedFile = try await connector.openUTF8File(at: fileURL)
+            let openedFile = try await connector.openTextFile(at: fileURL)
             try FileManager.default.removeItem(at: fileURL)
             switch replacementKind {
             case .directory:
@@ -467,12 +650,12 @@ final class FileAccessConnectorTests: XCTestCase {
         }
     }
 
-    func testSaveUTF8FileReportsBookmarkResolutionFailureWhenOriginalDisappears() async throws {
+    func testSaveTextFileReportsBookmarkResolutionFailureWhenOriginalDisappears() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Missing.txt", isDirectory: false)
         try Data("Original\n".utf8).write(to: fileURL, options: .withoutOverwriting)
         let connector = FileAccessConnector(fileManager: .default)
-        let openedFile = try await connector.openUTF8File(at: fileURL)
+        let openedFile = try await connector.openTextFile(at: fileURL)
         try FileManager.default.removeItem(at: fileURL)
 
         await assertSaveFails(
@@ -485,7 +668,7 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
-    func testSaveUTF8FileClassifiesReplacementFailureBeforeWriteAsUnchanged() async throws {
+    func testSaveTextFileClassifiesReplacementFailureBeforeWriteAsUnchanged() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Unchanged.txt", isDirectory: false)
         let originalBytes = Data("Original\n".utf8)
@@ -508,7 +691,7 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fileURL), originalBytes)
     }
 
-    func testSaveUTF8FileTreatsVerifiedIntendedBytesAsSuccessWhenReplacementReportsError() async throws {
+    func testSaveTextFileTreatsVerifiedIntendedBytesAsSuccessWhenReplacementReportsError() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Succeeded.txt", isDirectory: false)
         let originalBytes = Data("Original\n".utf8)
@@ -527,7 +710,7 @@ final class FileAccessConnectorTests: XCTestCase {
         )
         let encodedFile = try encodeNewTextFile(text: "Edited\n")
 
-        let outcome = try await connector.saveUTF8File(
+        let outcome = try await connector.saveTextFile(
             binding: binding,
             encodedFile: encodedFile
         )
@@ -539,7 +722,7 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fileURL), encodedFile.data)
     }
 
-    func testSaveUTF8FileReportsIndeterminateOutcomeWhenReplacementErrorLeavesThirdContent() async throws {
+    func testSaveTextFileReportsIndeterminateOutcomeWhenReplacementErrorLeavesThirdContent() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Indeterminate.txt", isDirectory: false)
         let originalBytes = Data("Original\n".utf8)
@@ -744,7 +927,7 @@ private func assertOpenFails(
     expectedError: FileAccessConnectorError
 ) async {
     do {
-        _ = try await connector.openUTF8File(at: fileURL)
+        _ = try await connector.openTextFile(at: fileURL)
         XCTFail("Expected File Open to fail.")
     } catch let error as FileAccessConnectorError {
         XCTAssertEqual(error, expectedError)
@@ -761,7 +944,7 @@ private func assertSaveFails(
     expectedError: FileAccessConnectorError
 ) async {
     do {
-        _ = try await connector.saveUTF8File(
+        _ = try await connector.saveTextFile(
             binding: binding,
             encodedFile: encodedFile
         )

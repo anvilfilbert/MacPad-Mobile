@@ -191,7 +191,7 @@ final class PhonePadAppModel: ObservableObject {
         }
 
         do {
-            let openedFile = try await fileAccessConnector.openUTF8File(
+            let openedFile = try await fileAccessConnector.openTextFile(
                 at: selectedURL
             )
             state = openBoundDocument(
@@ -320,13 +320,12 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveNotice = nil
         defer { fileSaveInProgress = false }
 
-        await cancelPendingCheckpointForFileSave()
-
         do {
             let preparedSave = try prepareBoundFileSave(
                 state: state,
                 recoveryEditedAt: Date()
             )
+            await cancelPendingCheckpointForFileSave()
             let protectedState = try await protectPreparedBoundFileSave(
                 state: state,
                 preparedSave: preparedSave,

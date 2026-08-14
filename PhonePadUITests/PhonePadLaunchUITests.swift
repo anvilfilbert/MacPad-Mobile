@@ -164,7 +164,27 @@ final class PhonePadLaunchUITests: XCTestCase {
         XCTAssertTrue(saveAsSheet.waitForExistence(timeout: 5))
         let fileNameField = app.textFields["phonepad.save-as.filename"]
         XCTAssertTrue(fileNameField.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.descendants(matching: .any)["phonepad.save-as.encoding"].exists)
+        let encodingPicker = app.descendants(matching: .any)["phonepad.save-as.encoding"]
+            .firstMatch
+        XCTAssertTrue(encodingPicker.waitForExistence(timeout: 2))
+        encodingPicker.tap()
+        let encodingIdentifiers = [
+            "phonepad.save-as.encoding.utf8",
+            "phonepad.save-as.encoding.utf8-with-bom",
+            "phonepad.save-as.encoding.utf16-little-endian-with-bom",
+            "phonepad.save-as.encoding.utf16-big-endian-with-bom",
+            "phonepad.save-as.encoding.windows-1252",
+            "phonepad.save-as.encoding.iso-8859-1",
+        ]
+        for identifier in encodingIdentifiers {
+            XCTAssertTrue(
+                app.descendants(matching: .any)[identifier].firstMatch
+                    .waitForExistence(timeout: 2)
+            )
+        }
+        app.descendants(matching: .any)["phonepad.save-as.encoding.utf8"]
+            .firstMatch
+            .tap()
         fileNameField.tap()
         fileNameField.typeText("/")
 

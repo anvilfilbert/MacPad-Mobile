@@ -190,11 +190,11 @@ public func prepareNewFileSave(
     }
 
     let validatedFileName = try ValidatedFileName(validating: fileName)
-    let encodedFile: EncodedTextFile
-    switch encoding {
-    case .utf8:
-        encodedFile = try encodeNewTextFile(text: document.text)
-    }
+    let encodedFile = try encodeTextFile(
+        text: document.text,
+        encoding: encoding,
+        lineEnding: .lf
+    )
     return PreparedNewFileSave(
         documentID: document.id,
         sourceTitle: document.title,

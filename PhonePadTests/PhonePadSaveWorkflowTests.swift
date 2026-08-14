@@ -5,6 +5,115 @@ import PhonePadCore
 
 @MainActor
 final class PhonePadSaveWorkflowTests: XCTestCase {
+    func testSaveAsWritesEverySelectedEncodingWithUnixLineEndings() async throws {
+        let cases: [SaveAsEncodingCase] = [
+            SaveAsEncodingCase(
+                fileName: "UTF8.txt",
+                encoding: .utf8,
+                expectedBytes: Data([0x43, 0x61, 0x66, 0xc3, 0xa9, 0x0a])
+            ),
+            SaveAsEncodingCase(
+                fileName: "UTF8-BOM.txt",
+                encoding: .utf8WithBOM,
+                expectedBytes: Data([
+                    0xef, 0xbb, 0xbf,
+                    0x43, 0x61, 0x66, 0xc3, 0xa9, 0x0a,
+                ])
+            ),
+            SaveAsEncodingCase(
+                fileName: "UTF16-LE.txt",
+                encoding: .utf16LittleEndianWithBOM,
+                expectedBytes: Data([
+                    0xff, 0xfe,
+                    0x43, 0x00, 0x61, 0x00, 0x66, 0x00, 0xe9, 0x00, 0x0a, 0x00,
+                ])
+            ),
+            SaveAsEncodingCase(
+                fileName: "UTF16-BE.txt",
+                encoding: .utf16BigEndianWithBOM,
+                expectedBytes: Data([
+                    0xfe, 0xff,
+                    0x00, 0x43, 0x00, 0x61, 0x00, 0x66, 0x00, 0xe9, 0x00, 0x0a,
+                ])
+            ),
+            SaveAsEncodingCase(
+                fileName: "Windows-1252.txt",
+                encoding: .windows1252,
+                expectedBytes: Data([0x43, 0x61, 0x66, 0xe9, 0x0a])
+            ),
+            SaveAsEncodingCase(
+                fileName: "ISO-8859-1.txt",
+                encoding: .iso88591,
+                expectedBytes: Data([0x43, 0x61, 0x66, 0xe9, 0x0a])
+            ),
+        ]
+
+        for fixtureCase in cases {
+            let fixture = try await makeProtectedFixture(text: "Café\r\n")
+            let preparedSave = try prepareNewFileSave(
+                state: fixture.state,
+                fileName: fixtureCase.fileName,
+                encoding: fixtureCase.encoding,
+                recoveryEditedAt: Date(timeIntervalSince1970: 1_786_700_000)
+            )
+
+            XCTAssertEqual(preparedSave.encodedFile.data, fixtureCase.expectedBytes)
+            XCTAssertEqual(preparedSave.encodedFile.lineEnding, .lf)
+
+            let result = try await savePreparedNewDocument(
+                state: fixture.state,
+                preparedSave: preparedSave,
+                selectedFolderURL: fixture.filesURL,
+                fileAccessConnector: FileAccessConnector(fileManager: .default),
+                recoveryStore: fixture.store
+            )
+
+            XCTAssertEqual(
+                try Data(
+                    contentsOf: fixture.filesURL.appendingPathComponent(
+                        fixtureCase.fileName,
+                        isDirectory: false
+                    )
+                ),
+                fixtureCase.expectedBytes
+            )
+            XCTAssertEqual(
+                result.state.activeTab.document.fileBinding?.encoding,
+                fixtureCase.encoding
+            )
+            XCTAssertEqual(result.state.activeTab.document.fileBinding?.lineEnding, .lf)
+        }
+    }
+
+    func testUnrepresentableSaveAsKeepsProtectedRecoveryAndCreatesNoFile() async throws {
+        let fixture = try await makeProtectedFixture(text: "Emoji 😀\n")
+
+        XCTAssertThrowsError(
+            try prepareNewFileSave(
+                state: fixture.state,
+                fileName: "Legacy.txt",
+                encoding: .windows1252,
+                recoveryEditedAt: Date(timeIntervalSince1970: 1_786_700_100)
+            )
+        ) { error in
+            XCTAssertNotNil(error as? TextFileEncodingError)
+        }
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.filesURL.appendingPathComponent("Legacy.txt").path
+            )
+        )
+        let recovery = try await fixture.store.load(
+            documentID: fixture.state.activeTab.document.id
+        )
+        XCTAssertEqual(recovery?.text, "Emoji 😀\n")
+        XCTAssertEqual(
+            fixture.state.activeTab.document.recoveryState,
+            .protectedUnsaved
+        )
+    }
+
     func testProtectedNewDocumentSavesExactFileAndTerminatesRecovery() async throws {
         let fixture = try await makeProtectedFixture(text: "First line\r\nSecond line")
         let preparedSave = try prepareNewFileSave(
@@ -642,6 +751,12 @@ private struct SaveWorkflowFixture {
     let recoveryURL: URL
     let state: PhonePadState
     let store: FileRecoveryStore
+}
+
+private struct SaveAsEncodingCase {
+    let fileName: String
+    let encoding: TextFileEncoding
+    let expectedBytes: Data
 }
 
 private struct ForcedSaveWorkflowBookmarkError: Error, Sendable {}

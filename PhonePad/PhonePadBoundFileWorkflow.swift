@@ -96,7 +96,11 @@ public func prepareBoundFileSave(
         )
     }
 
-    let encodedFile = try encodeNewTextFile(text: document.text)
+    let encodedFile = try encodeTextFile(
+        text: document.text,
+        encoding: fileBinding.encoding,
+        lineEnding: fileBinding.lineEnding
+    )
     let recoveryEnvelope = try RecoveryEnvelope(
         formatVersion: RecoveryEnvelope.currentFormatVersion,
         documentID: document.id,
@@ -179,7 +183,7 @@ public func saveProtectedBoundDocument<RecoveryStore: RecoveryStoring>(
         )
     }
 
-    let saveOutcome = try await fileAccessConnector.saveUTF8File(
+    let saveOutcome = try await fileAccessConnector.saveTextFile(
         binding: preparedSave.sourceBinding,
         encodedFile: preparedSave.encodedFile
     )

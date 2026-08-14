@@ -222,6 +222,26 @@ final class FileModelsTests: XCTestCase {
         }
     }
 
+    func testEditNormalizesLineEndingsInStateAndRecoveryCheckpoint() throws {
+        let state = makeInitialPhonePadState(
+            documentID: DocumentID(
+                rawValue: UUID(uuidString: "50000000-0000-0000-0000-000000000011")!
+            ),
+            tabID: TabID(
+                rawValue: UUID(uuidString: "50000000-0000-0000-0000-000000000012")!
+            )
+        )
+
+        let transition = try beginActiveDocumentEdit(
+            state: state,
+            newText: "One\r\nTwo\rThree",
+            editedAt: Date(timeIntervalSince1970: 1_786_646_500)
+        )
+
+        XCTAssertEqual(transition.state.activeTab.document.text, "One\nTwo\nThree")
+        XCTAssertEqual(transition.envelope.text, "One\nTwo\nThree")
+    }
+
     func testFileDigestRequiresExactlyThirtyTwoBytes() throws {
         let digest = try FileDigest(bytes: Data(repeating: 0x7f, count: 32))
 

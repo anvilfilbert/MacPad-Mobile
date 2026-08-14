@@ -197,6 +197,31 @@ struct PhonePadRootView: View {
                         Text("UTF-8")
                             .tag(TextFileEncoding.utf8)
                             .accessibilityIdentifier("phonepad.save-as.encoding.utf8")
+                        Text("UTF-8 with BOM")
+                            .tag(TextFileEncoding.utf8WithBOM)
+                            .accessibilityIdentifier(
+                                "phonepad.save-as.encoding.utf8-with-bom"
+                            )
+                        Text("UTF-16 Little Endian with BOM")
+                            .tag(TextFileEncoding.utf16LittleEndianWithBOM)
+                            .accessibilityIdentifier(
+                                "phonepad.save-as.encoding.utf16-little-endian-with-bom"
+                            )
+                        Text("UTF-16 Big Endian with BOM")
+                            .tag(TextFileEncoding.utf16BigEndianWithBOM)
+                            .accessibilityIdentifier(
+                                "phonepad.save-as.encoding.utf16-big-endian-with-bom"
+                            )
+                        Text("Windows-1252")
+                            .tag(TextFileEncoding.windows1252)
+                            .accessibilityIdentifier(
+                                "phonepad.save-as.encoding.windows-1252"
+                            )
+                        Text("ISO-8859-1")
+                            .tag(TextFileEncoding.iso88591)
+                            .accessibilityIdentifier(
+                                "phonepad.save-as.encoding.iso-8859-1"
+                            )
                     }
                     .pickerStyle(.menu)
                     .disabled(model.fileMutationDisabled)

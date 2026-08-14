@@ -5,6 +5,212 @@ import XCTest
 @testable import PhonePadCore
 
 final class PhonePadBoundFileWorkflowTests: XCTestCase {
+    func testBoundSavePreservesRepresentativeEncodingsAndLineEndings() async throws {
+        let cases: [BoundFileEncodingCase] = [
+            BoundFileEncodingCase(
+                fileName: "UTF8-BOM-CRLF.txt",
+                sourceBytes: Data([0xef, 0xbb, 0xbf, 0x41, 0x0d, 0x0a, 0x42, 0x0d, 0x0a]),
+                editedText: "Café\nLine\n",
+                expectedBytes: Data([
+                    0xef, 0xbb, 0xbf,
+                    0x43, 0x61, 0x66, 0xc3, 0xa9,
+                    0x0d, 0x0a,
+                    0x4c, 0x69, 0x6e, 0x65,
+                    0x0d, 0x0a,
+                ]),
+                expectedEncoding: .utf8WithBOM,
+                expectedLineEnding: .crlf
+            ),
+            BoundFileEncodingCase(
+                fileName: "UTF16-LE-CR.txt",
+                sourceBytes: Data([
+                    0xff, 0xfe,
+                    0x41, 0x00,
+                    0x0d, 0x00,
+                    0x42, 0x00,
+                ]),
+                editedText: "Snow ☃\nNext",
+                expectedBytes: Data([
+                    0xff, 0xfe,
+                    0x53, 0x00, 0x6e, 0x00, 0x6f, 0x00, 0x77, 0x00, 0x20, 0x00,
+                    0x03, 0x26,
+                    0x0d, 0x00,
+                    0x4e, 0x00, 0x65, 0x00, 0x78, 0x00, 0x74, 0x00,
+                ]),
+                expectedEncoding: .utf16LittleEndianWithBOM,
+                expectedLineEnding: .cr
+            ),
+            BoundFileEncodingCase(
+                fileName: "UTF16-BE-LF.txt",
+                sourceBytes: Data([
+                    0xfe, 0xff,
+                    0x00, 0x41,
+                    0x00, 0x0a,
+                    0x00, 0x42,
+                ]),
+                editedText: "Café\nLine",
+                expectedBytes: Data([
+                    0xfe, 0xff,
+                    0x00, 0x43, 0x00, 0x61, 0x00, 0x66, 0x00, 0xe9,
+                    0x00, 0x0a,
+                    0x00, 0x4c, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x65,
+                ]),
+                expectedEncoding: .utf16BigEndianWithBOM,
+                expectedLineEnding: .lf
+            ),
+            BoundFileEncodingCase(
+                fileName: "Windows-1252-CR.txt",
+                sourceBytes: Data([0x43, 0x61, 0x66, 0xe9, 0x0d, 0x42]),
+                editedText: "Euro €\nNext",
+                expectedBytes: Data([
+                    0x45, 0x75, 0x72, 0x6f, 0x20, 0x80,
+                    0x0d,
+                    0x4e, 0x65, 0x78, 0x74,
+                ]),
+                expectedEncoding: .windows1252,
+                expectedLineEnding: .cr
+            ),
+            BoundFileEncodingCase(
+                fileName: "ISO-8859-1-LF.txt",
+                sourceBytes: Data([0x41, 0x81, 0x0a]),
+                editedText: "A\u{0081}\nB",
+                expectedBytes: Data([0x41, 0x81, 0x0a, 0x42]),
+                expectedEncoding: .iso88591,
+                expectedLineEnding: .lf
+            ),
+        ]
+
+        for fixtureCase in cases {
+            let fixture = try makeFixture(
+                fileName: fixtureCase.fileName,
+                sourceBytes: fixtureCase.sourceBytes
+            )
+            let connector = FileAccessConnector(fileManager: .default)
+            let openedState = try await openState(
+                sourceURL: fixture.sourceURL,
+                connector: connector
+            )
+            XCTAssertEqual(
+                openedState.activeTab.document.fileBinding?.encoding,
+                fixtureCase.expectedEncoding
+            )
+            XCTAssertEqual(
+                openedState.activeTab.document.fileBinding?.lineEnding,
+                fixtureCase.expectedLineEnding
+            )
+            let editedState = try await editActiveDocumentAndCheckpoint(
+                state: openedState,
+                newText: fixtureCase.editedText,
+                editedAt: Date(timeIntervalSince1970: 1_770_100_100),
+                recoveryStore: fixture.recoveryStore
+            )
+            let preparedSave = try prepareBoundFileSave(
+                state: editedState,
+                recoveryEditedAt: Date(timeIntervalSince1970: 1_770_100_200)
+            )
+
+            XCTAssertEqual(try Data(contentsOf: fixture.sourceURL), fixtureCase.sourceBytes)
+            XCTAssertEqual(preparedSave.encodedFile.data, fixtureCase.expectedBytes)
+
+            let result = try await savePreparedBoundDocument(
+                state: editedState,
+                preparedSave: preparedSave,
+                fileAccessConnector: connector,
+                recoveryStore: fixture.recoveryStore
+            )
+
+            XCTAssertEqual(try Data(contentsOf: fixture.sourceURL), fixtureCase.expectedBytes)
+            XCTAssertEqual(
+                result.state.activeTab.document.fileBinding?.encoding,
+                fixtureCase.expectedEncoding
+            )
+            XCTAssertEqual(
+                result.state.activeTab.document.fileBinding?.lineEnding,
+                fixtureCase.expectedLineEnding
+            )
+            XCTAssertFalse(result.state.activeTab.document.isUnsaved)
+        }
+    }
+
+    func testUnrepresentableBoundSaveKeepsOriginalAndProtectedRecovery() async throws {
+        let sourceBytes = Data([0x43, 0x61, 0x66, 0xe9, 0x0a])
+        let fixture = try makeFixture(
+            fileName: "Windows-1252.txt",
+            sourceBytes: sourceBytes
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+        let openedState = try await openState(
+            sourceURL: fixture.sourceURL,
+            connector: connector
+        )
+        let editedState = try await editActiveDocumentAndCheckpoint(
+            state: openedState,
+            newText: "Emoji 😀\n",
+            editedAt: Date(timeIntervalSince1970: 1_770_100_300),
+            recoveryStore: fixture.recoveryStore
+        )
+
+        XCTAssertThrowsError(
+            try prepareBoundFileSave(
+                state: editedState,
+                recoveryEditedAt: Date(timeIntervalSince1970: 1_770_100_400)
+            )
+        ) { error in
+            XCTAssertNotNil(error as? TextFileEncodingError)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fixture.sourceURL), sourceBytes)
+        XCTAssertTrue(editedState.activeTab.document.isUnsaved)
+        let recovery = try await fixture.recoveryStore.load(
+            documentID: editedState.activeTab.document.id
+        )
+        XCTAssertEqual(recovery?.text, "Emoji 😀\n")
+        XCTAssertEqual(recovery?.fileReference?.encoding, .windows1252)
+    }
+
+    func testOversizedBoundEncodingKeepsOriginalAndProtectedRecovery() async throws {
+        let sourceBytes = Data([0xff, 0xfe, 0x41, 0x00, 0x0a, 0x00])
+        let fixture = try makeFixture(
+            fileName: "UTF16-LE.txt",
+            sourceBytes: sourceBytes
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+        let openedState = try await openState(
+            sourceURL: fixture.sourceURL,
+            connector: connector
+        )
+        let validUTF8ButOversizedUTF16 = String(
+            repeating: "a",
+            count: maximumSupportedTextFileByteCount / 2 + 1
+        )
+        let editedState = try await editActiveDocumentAndCheckpoint(
+            state: openedState,
+            newText: validUTF8ButOversizedUTF16,
+            editedAt: Date(timeIntervalSince1970: 1_770_100_500),
+            recoveryStore: fixture.recoveryStore
+        )
+
+        XCTAssertThrowsError(
+            try prepareBoundFileSave(
+                state: editedState,
+                recoveryEditedAt: Date(timeIntervalSince1970: 1_770_100_600)
+            )
+        ) { error in
+            XCTAssertNotNil(error as? TextFileEncodingError)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fixture.sourceURL), sourceBytes)
+        XCTAssertTrue(editedState.activeTab.document.isUnsaved)
+        let recovery = try await fixture.recoveryStore.load(
+            documentID: editedState.activeTab.document.id
+        )
+        XCTAssertEqual(recovery?.text.count, validUTF8ButOversizedUTF16.count)
+        XCTAssertEqual(
+            recovery?.fileReference?.encoding,
+            .utf16LittleEndianWithBOM
+        )
+    }
+
     func testProtectBoundSavePersistsPendingIntentBeforeOriginalFileChanges() async throws {
         let fixture = try makeFixture(originalText: "Original\n")
         let connector = FileAccessConnector(fileManager: .default)
@@ -180,6 +386,16 @@ final class PhonePadBoundFileWorkflowTests: XCTestCase {
     }
 
     private func makeFixture(originalText: String) throws -> BoundFileFixture {
+        try makeFixture(
+            fileName: "Source.txt",
+            sourceBytes: Data(originalText.utf8)
+        )
+    }
+
+    private func makeFixture(
+        fileName: String,
+        sourceBytes: Data
+    ) throws -> BoundFileFixture {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(
@@ -191,10 +407,10 @@ final class PhonePadBoundFileWorkflowTests: XCTestCase {
             try FileManager.default.removeItem(at: rootURL)
         }
         let sourceURL = rootURL.appendingPathComponent(
-            "Source.txt",
+            fileName,
             isDirectory: false
         )
-        try Data(originalText.utf8).write(
+        try sourceBytes.write(
             to: sourceURL,
             options: .withoutOverwriting
         )
@@ -216,7 +432,7 @@ final class PhonePadBoundFileWorkflowTests: XCTestCase {
         sourceURL: URL,
         connector: FileAccessConnector
     ) async throws -> PhonePadState {
-        let openedFile = try await connector.openUTF8File(at: sourceURL)
+        let openedFile = try await connector.openTextFile(at: sourceURL)
         return openBoundDocument(
             state: makeInitialPhonePadState(
                 documentID: DocumentID(rawValue: UUID()),
@@ -228,6 +444,15 @@ final class PhonePadBoundFileWorkflowTests: XCTestCase {
             fileBinding: openedFile.binding
         )
     }
+}
+
+private struct BoundFileEncodingCase {
+    let fileName: String
+    let sourceBytes: Data
+    let editedText: String
+    let expectedBytes: Data
+    let expectedEncoding: TextFileEncoding
+    let expectedLineEnding: TextLineEnding
 }
 
 private struct BoundFileFixture {

@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import PhonePadCore
+import UniformTypeIdentifiers
 
 public enum ExistingFileSystemItemKind: String, Equatable, Sendable {
     case regularFile
@@ -34,7 +35,7 @@ public enum FileCreationOutcome: Equatable, Sendable {
     case verifiedDetached(VerifiedDetachedFile)
 }
 
-public struct OpenedUTF8File: Equatable, Sendable {
+public struct OpenedTextFile: Equatable, Sendable {
     public let text: String
     public let binding: FileBinding
 
@@ -81,9 +82,12 @@ public indirect enum FileAccessConnectorError: Error, Equatable, Sendable {
     case stagingCleanupFailed(code: Int, after: FileAccessConnectorError)
     case selectedFileMissing
     case selectedFileIsNotRegularFile(ExistingFileSystemItemKind)
+    case selectedFileIsPackage
+    case selectedFileHasUnsupportedContentType(String)
+    case selectedFileMetadataInspectionFailed(code: Int)
     case inputTooLarge(actualByteCount: Int, maximumByteCount: Int)
     case inputReadFailed(code: Int)
-    case inputIsNotUTF8
+    case textDecodingFailed(TextFileDecodingError)
     case selectedFileNameInvalid
     case fileIdentityInspectionFailed(code: Int)
     case fileIdentityValueInvalid
@@ -135,12 +139,18 @@ extension FileAccessConnectorError: LocalizedError {
             return "Selected File no longer exists. Choose an available File and try again."
         case let .selectedFileIsNotRegularFile(kind):
             return "Selected item is a \(kind.description), not a regular File. Choose a plain-text File."
+        case .selectedFileIsPackage:
+            return "Selected item is a File package, not a plain-text File. Choose a regular text File."
+        case let .selectedFileHasUnsupportedContentType(identifier):
+            return "Selected File has unsupported content type \(identifier). Choose a plain-text File or generic data File."
+        case let .selectedFileMetadataInspectionFailed(code):
+            return "Selected File type could not be inspected (system code \(code)). Check Files access and try again."
         case let .inputTooLarge(actualByteCount, maximumByteCount):
             return "Selected File is \(actualByteCount) bytes; PhonePad supports at most \(maximumByteCount) bytes."
         case let .inputReadFailed(code):
             return "Selected File could not be read (system code \(code)). Check Files access and try again."
-        case .inputIsNotUTF8:
-            return "Selected File is not valid UTF-8 plain text. Choose another File."
+        case let .textDecodingFailed(error):
+            return "Selected File is not supported plain text: \(error.localizedDescription)"
         case .selectedFileNameInvalid:
             return "Selected File has an unsupported name. Rename it in Files and try again."
         case let .fileIdentityInspectionFailed(code):
@@ -354,7 +364,7 @@ public actor FileAccessConnector {
         }
     }
 
-    public func openUTF8File(at selectedURL: URL) throws -> OpenedUTF8File {
+    public func openTextFile(at selectedURL: URL) throws -> OpenedTextFile {
         let didStartSecurityScope = selectedURL.startAccessingSecurityScopedResource()
         defer {
             if didStartSecurityScope {
@@ -362,7 +372,7 @@ public actor FileAccessConnector {
             }
         }
 
-        try requireSelectedRegularFile(at: selectedURL, fileManager: fileManager)
+        try requireSelectedOpenCandidate(at: selectedURL, fileManager: fileManager)
 
         let resultBox = OpenFileCoordinationResultBox()
         var coordinationError: NSError?
@@ -375,7 +385,7 @@ public actor FileAccessConnector {
             options: .withoutChanges,
             error: &coordinationError
         ) { coordinatedURL in
-            resultBox.result = openCoordinatedUTF8File(
+            resultBox.result = openCoordinatedTextFile(
                 at: coordinatedURL,
                 fileManager: fileManager,
                 bookmarkCreator: bookmarkCreator,
@@ -394,7 +404,7 @@ public actor FileAccessConnector {
         throw FileAccessConnectorError.fileCoordinationAccessorNotInvoked
     }
 
-    public func saveUTF8File(
+    public func saveTextFile(
         binding: FileBinding,
         encodedFile: EncodedTextFile
     ) throws -> FileSaveOutcome {
@@ -671,7 +681,7 @@ private enum RegularFileReadFailure: Error, Equatable, Sendable {
 }
 
 private final class OpenFileCoordinationResultBox: @unchecked Sendable {
-    var result: Result<OpenedUTF8File, FileAccessConnectorError>?
+    var result: Result<OpenedTextFile, FileAccessConnectorError>?
 }
 
 private final class BoundFileReplacementResultBox: @unchecked Sendable {
@@ -753,18 +763,21 @@ private func replaceFileSafely(
     )
 }
 
-private func openCoordinatedUTF8File(
+private func openCoordinatedTextFile(
     at url: URL,
     fileManager: FileManager,
     bookmarkCreator: FileAccessConnector.BookmarkCreator,
     identityReader: FileAccessConnector.FileIdentityReader
-) -> Result<OpenedUTF8File, FileAccessConnectorError> {
+) -> Result<OpenedTextFile, FileAccessConnectorError> {
     do {
+        try validateSelectedFileForOpen(at: url, fileManager: fileManager)
         let data = try readSelectedFile(at: url, fileManager: fileManager)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw FileAccessConnectorError.inputIsNotUTF8
+        let decodedFile: DecodedTextFile
+        do {
+            decodedFile = try decodeSupportedTextFile(data: data)
+        } catch let error as TextFileDecodingError {
+            throw FileAccessConnectorError.textDecodingFailed(error)
         }
-        let digest = try makeDigest(data: data)
         let displayName: ValidatedFileName
         do {
             displayName = try ValidatedFileName(validating: url.lastPathComponent)
@@ -794,11 +807,11 @@ private func openCoordinatedUTF8File(
             bookmark: bookmark,
             identity: identity,
             displayName: displayName,
-            digest: digest,
-            encoding: .utf8,
-            lineEnding: .lf
+            digest: decodedFile.digest,
+            encoding: decodedFile.encoding,
+            lineEnding: decodedFile.lineEnding
         )
-        return .success(OpenedUTF8File(text: text, binding: binding))
+        return .success(OpenedTextFile(text: decodedFile.text, binding: binding))
     } catch let error as FileAccessConnectorError {
         return .failure(error)
     } catch {
@@ -808,16 +821,82 @@ private func openCoordinatedUTF8File(
     }
 }
 
-private func requireSelectedRegularFile(
+private struct SelectedFileMetadata {
+    let contentType: UTType?
+    let isPackage: Bool
+}
+
+private func validateSelectedFileForOpen(
+    at url: URL,
+    fileManager: FileManager
+) throws {
+    let nodeKind = try inspectNode(at: url, fileManager: fileManager)
+    let nodeIsDirectory: Bool
+    switch nodeKind {
+    case .missing:
+        throw FileAccessConnectorError.selectedFileMissing
+    case .directory:
+        nodeIsDirectory = true
+    case .existing(.regularFile):
+        nodeIsDirectory = false
+    case let .existing(kind):
+        throw FileAccessConnectorError.selectedFileIsNotRegularFile(kind)
+    }
+    let metadata = try readSelectedFileMetadata(at: url)
+    if metadata.isPackage || metadata.contentType?.conforms(to: .package) == true {
+        throw FileAccessConnectorError.selectedFileIsPackage
+    }
+    if nodeIsDirectory {
+        throw FileAccessConnectorError.selectedFileIsNotRegularFile(.directory)
+    }
+    guard let contentType = metadata.contentType else {
+        return
+    }
+    if contentType.conforms(to: .rtf)
+        || contentType.conforms(to: .rtfd)
+        || contentType.conforms(to: .flatRTFD) {
+        throw FileAccessConnectorError.selectedFileHasUnsupportedContentType(
+            contentType.identifier
+        )
+    }
+    guard contentType.isDynamic || contentType.conforms(to: .data) else {
+        throw FileAccessConnectorError.selectedFileHasUnsupportedContentType(
+            contentType.identifier
+        )
+    }
+}
+
+private func readSelectedFileMetadata(at url: URL) throws -> SelectedFileMetadata {
+    let packageValues: URLResourceValues
+    do {
+        packageValues = try url.resourceValues(forKeys: [.isPackageKey])
+    } catch {
+        throw FileAccessConnectorError.selectedFileMetadataInspectionFailed(
+            code: (error as NSError).code
+        )
+    }
+    let contentType: UTType?
+    do {
+        contentType = try url.resourceValues(forKeys: [.contentTypeKey]).contentType
+    } catch {
+        throw FileAccessConnectorError.selectedFileMetadataInspectionFailed(
+            code: (error as NSError).code
+        )
+    }
+    return SelectedFileMetadata(
+        contentType: contentType,
+        isPackage: packageValues.isPackage == true
+    )
+}
+
+private func requireSelectedOpenCandidate(
     at url: URL,
     fileManager: FileManager
 ) throws {
     switch try inspectNode(at: url, fileManager: fileManager) {
     case .missing:
         throw FileAccessConnectorError.selectedFileMissing
-    case .directory:
-        throw FileAccessConnectorError.selectedFileIsNotRegularFile(.directory)
-    case .existing(.regularFile):
+    case .directory, .existing(.regularFile):
         return
     case let .existing(kind):
         throw FileAccessConnectorError.selectedFileIsNotRegularFile(kind)

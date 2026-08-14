@@ -199,13 +199,14 @@ public func beginActiveDocumentEdit(
     editedAt: Date
 ) throws -> RecoveryEditTransition {
     let activeTab = try requireActiveTab(state: state)
+    let validatedText = try validateEditableDocumentText(text: newText)
     let recoveryFileReference = activeTab.document.fileBinding
         .map(makeRecoveryFileReference)
         ?? activeTab.document.recoveryFileReference
     let editedDocument = PhonePadDocument(
         id: activeTab.document.id,
         title: activeTab.document.title,
-        text: newText,
+        text: validatedText,
         fileBinding: activeTab.document.fileBinding,
         recoveryFileReference: recoveryFileReference,
         isUnsaved: true,

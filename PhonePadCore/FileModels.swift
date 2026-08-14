@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 public let maximumSupportedTextFileByteCount: Int = 25 * 1024 * 1024
@@ -15,10 +14,17 @@ public struct FileIdentity: Codable, Equatable, Hashable, Sendable {
 
 public enum TextFileEncoding: String, Codable, Equatable, Hashable, Sendable {
     case utf8
+    case utf8WithBOM
+    case utf16LittleEndianWithBOM
+    case utf16BigEndianWithBOM
+    case windows1252
+    case iso88591
 }
 
 public enum TextLineEnding: String, Codable, Equatable, Hashable, Sendable {
+    case crlf
     case lf
+    case cr
 }
 
 public enum FileDigestValidationError: Error, Equatable, Sendable {
@@ -267,22 +273,22 @@ public func makeRecoveryFileReference(
 }
 
 public func encodeNewTextFile(text: String) throws -> EncodedTextFile {
-    let normalizedText = text
-        .replacingOccurrences(of: "\r\n", with: "\n")
-        .replacingOccurrences(of: "\r", with: "\n")
-    let data = Data(normalizedText.utf8)
-    guard data.count <= maximumSupportedTextFileByteCount else {
-        throw NewTextFileEncodingError.contentTooLarge(
-            actualByteCount: data.count,
-            maximumByteCount: maximumSupportedTextFileByteCount
+    do {
+        return try encodeTextFile(
+            text: text,
+            encoding: .utf8,
+            lineEnding: .lf
         )
+    } catch let error as TextFileEncodingError {
+        switch error {
+        case let .contentTooLarge(_, actualByteCount, maximumByteCount):
+            throw NewTextFileEncodingError.contentTooLarge(
+                actualByteCount: actualByteCount,
+                maximumByteCount: maximumByteCount
+            )
+        case .unrepresentable, .unsupportedContent,
+             .containsNullScalar, .binaryLike:
+            throw error
+        }
     }
-    let digest = try FileDigest(bytes: Data(SHA256.hash(data: data)))
-    return EncodedTextFile(
-        text: normalizedText,
-        data: data,
-        digest: digest,
-        encoding: .utf8,
-        lineEnding: .lf
-    )
 }
