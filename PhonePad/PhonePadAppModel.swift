@@ -12,10 +12,33 @@ private struct PendingRecoveryCheckpoint {
     let requiresImmediateCheckpoint: Bool
 }
 
+private enum PhonePadRecoveryActionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+    case checkpointMustFinishBeforeRecovering
+    case recoveryItemCannotBeRecovered
+    case recoveryItemMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .actionAlreadyInProgress:
+            "Another recovery action is still running. Wait for it to finish and retry."
+        case .checkpointMustFinishBeforeRecovering:
+            "Current edits could not be protected. Resolve the recovery error before opening preserved work."
+        case .recoveryItemCannotBeRecovered:
+            "This preserved work is corrupt or unsupported. Keep it for a compatible PhonePad version, or choose Discard Recovery."
+        case .recoveryItemMissing:
+            "Preserved work is no longer available. Refresh Document Recovery and retry."
+        }
+    }
+}
+
 @MainActor
 final class PhonePadAppModel: ObservableObject {
     @Published private(set) var state: PhonePadState
     @Published private(set) var recoveryError: String?
+    @Published private(set) var recoveryItems: [RecoveryItemSummary]
+    @Published private(set) var recoveryCatalogError: String?
+    @Published private(set) var activeRecoveryAction: DocumentID?
 
     private let recoveryStore: FileRecoveryStore
     private let checkpointQuietPeriod: Duration
@@ -39,6 +62,9 @@ final class PhonePadAppModel: ObservableObject {
         self.checkpointMaximumInterval = checkpointMaximumInterval
         checkpointClock = ContinuousClock()
         recoveryError = nil
+        recoveryItems = []
+        recoveryCatalogError = nil
+        activeRecoveryAction = nil
         pendingCheckpoint = nil
         editGeneration = 0
     }
@@ -70,6 +96,96 @@ final class PhonePadAppModel: ObservableObject {
 
     var activeText: String {
         state.activeTab.document.text
+    }
+
+    func reportRecoveryTransitionError(_ error: Error) {
+        recoveryCatalogError = error.localizedDescription
+    }
+
+    func refreshRecoveryItems() async {
+        do {
+            let storedItems = try await recoveryStore.recoveryItems()
+            let openDocumentIDs = Set(state.tabs.map(\.document.id))
+            recoveryItems = storedItems.filter {
+                !openDocumentIDs.contains($0.documentID)
+            }
+            recoveryCatalogError = nil
+        } catch {
+            recoveryItems = []
+            recoveryCatalogError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func recoverRecovery(documentID: DocumentID) async -> Bool {
+        guard activeRecoveryAction == nil else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+
+        activeRecoveryAction = documentID
+        defer { activeRecoveryAction = nil }
+
+        guard await currentDocumentIsReadyForTransition() else {
+            return false
+        }
+
+        do {
+            guard let summary = recoveryItems.first(where: {
+                $0.documentID == documentID
+            }) else {
+                throw PhonePadRecoveryActionError.recoveryItemMissing
+            }
+            guard summary.status == .recoverable else {
+                throw PhonePadRecoveryActionError.recoveryItemCannotBeRecovered
+            }
+            guard let envelope = try await recoveryStore.load(documentID: documentID) else {
+                throw PhonePadRecoveryActionError.recoveryItemMissing
+            }
+            let displayEnvelope = RecoveryEnvelope(
+                formatVersion: envelope.formatVersion,
+                documentID: envelope.documentID,
+                title: summary.title,
+                text: envelope.text,
+                editedAt: envelope.editedAt
+            )
+            state = recoverDocument(
+                state: state,
+                envelope: displayEnvelope,
+                tabID: TabID(rawValue: UUID())
+            )
+            recoveryItems.removeAll { $0.documentID == documentID }
+            recoveryCatalogError = nil
+            return true
+        } catch {
+            recoveryCatalogError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func discardRecovery(documentID: DocumentID) async -> Bool {
+        guard activeRecoveryAction == nil else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+
+        activeRecoveryAction = documentID
+        defer { activeRecoveryAction = nil }
+
+        do {
+            try await recoveryStore.discardRecovery(documentID: documentID)
+            recoveryItems.removeAll { $0.documentID == documentID }
+            recoveryCatalogError = nil
+            return true
+        } catch {
+            recoveryCatalogError = error.localizedDescription
+            return false
+        }
     }
 
     func editActiveDocument(text: String) {
@@ -116,6 +232,21 @@ final class PhonePadAppModel: ObservableObject {
         checkpointTask = Task { @MainActor [weak self] in
             await self?.runCheckpointLoop()
         }
+    }
+
+    private func currentDocumentIsReadyForTransition() async -> Bool {
+        if let checkpointTask {
+            await checkpointTask.value
+        }
+
+        guard pendingCheckpoint == nil,
+              state.activeTab.document.recoveryState != .checkpointPending else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .checkpointMustFinishBeforeRecovering
+                .localizedDescription
+            return false
+        }
+        return true
     }
 
     private func runCheckpointLoop() async {

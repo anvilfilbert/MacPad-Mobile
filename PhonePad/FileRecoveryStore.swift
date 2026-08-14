@@ -25,6 +25,28 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
     case couldNotCommitCheckpoint(DocumentID, URL, String)
     case couldNotRemoveRecoveryArtifact(DocumentID, URL, String)
     case couldNotRemovePreviousGenerationBackup(DocumentID, URL, String)
+    case checkpointExceedsMaximumSize(
+        DocumentID,
+        actualByteCount: UInt64,
+        maximumByteCount: UInt64,
+        URL
+    )
+    case checkpointContentExceedsMaximumSize(
+        DocumentID,
+        actualByteCount: UInt64,
+        maximumByteCount: UInt64,
+        URL
+    )
+    case checkpointMetadataExceedsMaximumSize(
+        DocumentID,
+        actualByteCount: UInt64,
+        maximumByteCount: UInt64,
+        URL
+    )
+    case couldNotEnumerateRecovery(String)
+    case couldNotEncodeCleanupMarker(DocumentID, String)
+    case couldNotWriteCleanupMarker(DocumentID, URL, String)
+    case cleanupMarkerContentMismatch(DocumentID, URL)
 
     public var errorDescription: String? {
         switch self {
@@ -92,6 +114,20 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
             "Could not remove rejected recovery data for document \(documentID.rawValue). Do not discard recovery data; retry Recovery."
         case let .couldNotRemovePreviousGenerationBackup(documentID, _, _):
             "New recovery data for document \(documentID.rawValue) is verified, but protected cleanup remains. Retry Recovery."
+        case let .checkpointExceedsMaximumSize(documentID, _, _, _):
+            "Recovery data for document \(documentID.rawValue) exceeds the bounded recovery format size. Keep it until you choose Discard Recovery."
+        case let .checkpointContentExceedsMaximumSize(documentID, _, _, _):
+            "Recovery content for document \(documentID.rawValue) exceeds the 75 MiB limit. Keep it until you choose Discard Recovery."
+        case let .checkpointMetadataExceedsMaximumSize(documentID, _, _, _):
+            "Recovery metadata for document \(documentID.rawValue) exceeds the 64 KiB limit. Keep it until you choose Discard Recovery."
+        case .couldNotEnumerateRecovery:
+            "Could not inspect preserved work. Check available device storage and retry Document Recovery."
+        case let .couldNotEncodeCleanupMarker(documentID, _):
+            "Could not prepare Discard Recovery for document \(documentID.rawValue). Preserved work remains available; retry."
+        case let .couldNotWriteCleanupMarker(documentID, _, _):
+            "Could not record Discard Recovery for document \(documentID.rawValue). Preserved work remains available; retry."
+        case let .cleanupMarkerContentMismatch(documentID, _):
+            "Discard Recovery for document \(documentID.rawValue) could not be verified. Preserved work remains available; retry."
         }
     }
 }
@@ -125,11 +161,13 @@ public actor FileRecoveryStore: RecoveryStoring {
         let paths = transactionPaths(documentID: envelope.documentID)
         try reconcile(documentID: envelope.documentID, paths: paths)
 
-        let encodedEnvelope = try encode(envelope: envelope)
+        let protectedEnvelope = recoveryEnvelopeForUse(envelope)
+        try validateEnvelopeBounds(envelope: protectedEnvelope, url: paths.staging)
+        let encodedEnvelope = try encode(envelope: protectedEnvelope)
         do {
             try writeProtectedEnvelope(
                 data: encodedEnvelope,
-                envelope: envelope,
+                envelope: protectedEnvelope,
                 url: paths.staging
             )
         } catch {
@@ -150,7 +188,7 @@ public actor FileRecoveryStore: RecoveryStoring {
         do {
             try writeProtectedEnvelope(
                 data: encodedEnvelope,
-                envelope: envelope,
+                envelope: protectedEnvelope,
                 url: paths.transaction
             )
             try promote(
@@ -165,7 +203,7 @@ public actor FileRecoveryStore: RecoveryStoring {
             )
             try verifyStoredEnvelope(
                 url: paths.canonical,
-                expectedEnvelope: envelope,
+                expectedEnvelope: protectedEnvelope,
                 expectedData: encodedEnvelope
             )
             try postPromotionValidation(paths.canonical)
@@ -219,7 +257,7 @@ public actor FileRecoveryStore: RecoveryStoring {
         try prepareRecoveryDirectory()
         let paths = transactionPaths(documentID: documentID)
         try reconcile(documentID: documentID, paths: paths)
-        guard fileManager.fileExists(atPath: paths.canonical.path) else {
+        guard try recoveryArtifactExists(documentID: documentID, url: paths.canonical) else {
             return nil
         }
 
@@ -241,10 +279,110 @@ public actor FileRecoveryStore: RecoveryStoring {
         try prepareRecoveryDirectory()
         let paths = transactionPaths(documentID: documentID)
         try reconcile(documentID: documentID, paths: paths)
-        guard fileManager.fileExists(atPath: paths.canonical.path) else {
+        guard try recoveryArtifactExists(documentID: documentID, url: paths.canonical) else {
             throw FileRecoveryStoreError.checkpointNotFound(documentID, paths.canonical)
         }
         return try readVerification(url: paths.canonical, documentID: documentID)
+    }
+
+    public func recoveryItems() async throws -> [RecoveryItemSummary] {
+        try prepareRecoveryDirectory()
+
+        let urls: [URL]
+        do {
+            urls = try fileManager.contentsOfDirectory(
+                at: rootURL,
+                includingPropertiesForKeys: nil,
+                options: []
+            )
+        } catch {
+            throw FileRecoveryStoreError.couldNotEnumerateRecovery(
+                String(describing: error)
+            )
+        }
+
+        let documentIDs = Set(
+            urls.compactMap { recoveryArtifactDocumentID(filename: $0.lastPathComponent) }
+        )
+        var items: [RecoveryItemSummary] = []
+        for documentID in documentIDs {
+            let paths = transactionPaths(documentID: documentID)
+            do {
+                try reconcile(documentID: documentID, paths: paths)
+                guard try recoveryArtifactExists(
+                    documentID: documentID,
+                    url: paths.canonical
+                ) else {
+                    continue
+                }
+                let storedEnvelope = try readVerifiedEnvelope(
+                    documentID: documentID,
+                    url: paths.canonical
+                )
+                items.append(
+                    RecoveryItemSummary(
+                        documentID: documentID,
+                        title: recoveryDisplayTitle(storedEnvelope.envelope.title),
+                        lastEdited: .available(storedEnvelope.envelope.editedAt),
+                        status: .recoverable
+                    )
+                )
+            } catch let error as FileRecoveryStoreError {
+                guard let summary = recoveryFailureSummary(
+                    error: error,
+                    documentID: documentID
+                ) else {
+                    throw error
+                }
+                guard try recoveryArtifactExists(
+                    documentID: documentID,
+                    url: paths.canonical
+                ) else {
+                    continue
+                }
+                items.append(summary)
+            }
+        }
+
+        return items.sorted(by: recoverySummaryComesBefore)
+    }
+
+    public func discardRecovery(documentID: DocumentID) async throws {
+        try prepareRecoveryDirectory()
+        let paths = transactionPaths(documentID: documentID)
+
+        do {
+            try reconcile(documentID: documentID, paths: paths)
+        } catch let error as FileRecoveryStoreError {
+            guard recoveryFailureSummary(error: error, documentID: documentID) != nil else {
+                throw error
+            }
+        }
+
+        let hasRecoveryArtifact = try [
+            paths.canonical,
+            paths.staging,
+            paths.transaction,
+            paths.previous,
+        ].contains {
+            try recoveryArtifactExists(documentID: documentID, url: $0)
+        }
+        guard hasRecoveryArtifact else {
+            return
+        }
+
+        let marker = RecoveryCleanupMarker(documentID: documentID)
+        let markerData = try encodeCleanupMarker(marker)
+        try writeProtectedCleanupMarker(
+            marker: marker,
+            data: markerData,
+            url: paths.transaction
+        )
+        try finishDiscardRecovery(
+            marker: marker,
+            markerData: markerData,
+            paths: paths
+        )
     }
 
     private func prepareRecoveryDirectory() throws {
@@ -283,6 +421,180 @@ public actor FileRecoveryStore: RecoveryStoring {
         }
     }
 
+    private func encodeCleanupMarker(_ marker: RecoveryCleanupMarker) throws -> Data {
+        do {
+            return try JSONEncoder().encode(marker)
+        } catch {
+            throw FileRecoveryStoreError.couldNotEncodeCleanupMarker(
+                marker.documentID,
+                String(describing: error)
+            )
+        }
+    }
+
+    private func writeProtectedCleanupMarker(
+        marker: RecoveryCleanupMarker,
+        data: Data,
+        url: URL
+    ) throws {
+        do {
+            try data.write(
+                to: url,
+                options: [.atomic, .completeFileProtection]
+            )
+        } catch {
+            throw FileRecoveryStoreError.couldNotWriteCleanupMarker(
+                marker.documentID,
+                url,
+                String(describing: error)
+            )
+        }
+        try applyProtectedMetadata(url: url, documentID: marker.documentID)
+        try verifyCleanupMarker(marker: marker, url: url)
+    }
+
+    private func finishDiscardRecovery(
+        marker: RecoveryCleanupMarker,
+        markerData: Data,
+        paths: RecoveryTransactionPaths
+    ) throws {
+        let canonicalMarker = try readableCleanupMarkerIfPresent(
+            documentID: marker.documentID,
+            url: paths.canonical
+        )
+        if canonicalMarker != marker {
+            try writeProtectedCleanupMarker(
+                marker: marker,
+                data: markerData,
+                url: paths.staging
+            )
+            let hasCanonical = try recoveryArtifactExists(
+                documentID: marker.documentID,
+                url: paths.canonical
+            )
+            if hasCanonical {
+                try removeArtifactIfPresent(
+                    documentID: marker.documentID,
+                    url: paths.canonical
+                )
+            }
+            try promote(
+                documentID: marker.documentID,
+                stagingURL: paths.staging,
+                canonicalURL: paths.canonical,
+                hasPreviousGeneration: false
+            )
+            try applyProtectedMetadata(
+                url: paths.canonical,
+                documentID: marker.documentID
+            )
+        }
+
+        try verifyCleanupMarker(
+            marker: marker,
+            url: paths.canonical
+        )
+        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.staging)
+        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.previous)
+        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.transaction)
+        try removeArtifactIfPresent(documentID: marker.documentID, url: paths.canonical)
+    }
+
+    private func readCleanupMarkerIfPresent(
+        documentID: DocumentID,
+        url: URL
+    ) throws -> RecoveryCleanupMarker? {
+        guard try recoveryArtifactExists(documentID: documentID, url: url) else {
+            return nil
+        }
+        let byteCount = try recoveryFileByteCount(documentID: documentID, url: url)
+        guard byteCount <= maximumRecoveryCleanupMarkerByteCount else {
+            return nil
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw FileRecoveryStoreError.couldNotReadCheckpoint(
+                documentID,
+                url,
+                String(describing: error)
+            )
+        }
+
+        guard let marker = try? JSONDecoder().decode(
+            RecoveryCleanupMarker.self,
+            from: data
+        ) else {
+            return nil
+        }
+        guard marker.documentID == documentID,
+              marker.isCurrentDiscard else {
+            return nil
+        }
+        return marker
+    }
+
+    private func readableCleanupMarkerIfPresent(
+        documentID: DocumentID,
+        url: URL
+    ) throws -> RecoveryCleanupMarker? {
+        do {
+            return try readCleanupMarkerIfPresent(documentID: documentID, url: url)
+        } catch let error as FileRecoveryStoreError {
+            guard recoveryFailureSummary(error: error, documentID: documentID) != nil else {
+                throw error
+            }
+            return nil
+        }
+    }
+
+    private func verifyCleanupMarker(
+        marker: RecoveryCleanupMarker,
+        url: URL
+    ) throws {
+        let actualData: Data
+        do {
+            actualData = try Data(contentsOf: url)
+        } catch {
+            throw FileRecoveryStoreError.couldNotReadCheckpoint(
+                marker.documentID,
+                url,
+                String(describing: error)
+            )
+        }
+        guard let actualMarker = try? JSONDecoder().decode(
+                  RecoveryCleanupMarker.self,
+                  from: actualData
+              ),
+              actualMarker == marker else {
+            throw FileRecoveryStoreError.cleanupMarkerContentMismatch(
+                marker.documentID,
+                url
+            )
+        }
+
+        let verification = try readVerification(
+            url: url,
+            documentID: marker.documentID
+        )
+        guard verification.isExcludedFromBackup else {
+            throw FileRecoveryStoreError.backupExclusionVerificationFailed(
+                marker.documentID,
+                url
+            )
+        }
+        #if !targetEnvironment(simulator)
+        guard verification.hasCompleteFileProtection else {
+            throw FileRecoveryStoreError.fileProtectionVerificationFailed(
+                marker.documentID,
+                url
+            )
+        }
+        #endif
+    }
+
     private func writeProtectedEnvelope(
         data: Data,
         envelope: RecoveryEnvelope,
@@ -313,7 +625,7 @@ public actor FileRecoveryStore: RecoveryStoring {
         canonicalURL: URL,
         backupURL: URL
     ) throws -> (data: Data, envelope: RecoveryEnvelope)? {
-        guard fileManager.fileExists(atPath: canonicalURL.path) else {
+        guard try recoveryArtifactExists(documentID: documentID, url: canonicalURL) else {
             return nil
         }
         let previousGeneration = try readEnvelope(
@@ -428,9 +740,46 @@ public actor FileRecoveryStore: RecoveryStoring {
         documentID: DocumentID,
         paths: RecoveryTransactionPaths
     ) throws {
-        let hasTransaction = fileManager.fileExists(atPath: paths.transaction.path)
-        let hasPrevious = fileManager.fileExists(atPath: paths.previous.path)
-        let hasCanonical = fileManager.fileExists(atPath: paths.canonical.path)
+        let hasTransaction = try recoveryArtifactExists(
+            documentID: documentID,
+            url: paths.transaction
+        )
+        let hasPrevious = try recoveryArtifactExists(
+            documentID: documentID,
+            url: paths.previous
+        )
+        let hasCanonical = try recoveryArtifactExists(
+            documentID: documentID,
+            url: paths.canonical
+        )
+
+        if hasTransaction,
+           let marker = try readCleanupMarkerIfPresent(
+               documentID: documentID,
+               url: paths.transaction
+           ) {
+            let markerData = try encodeCleanupMarker(marker)
+            try finishDiscardRecovery(
+                marker: marker,
+                markerData: markerData,
+                paths: paths
+            )
+            return
+        }
+
+        if hasCanonical,
+           let marker = try readCleanupMarkerIfPresent(
+               documentID: documentID,
+               url: paths.canonical
+           ) {
+            let markerData = try encodeCleanupMarker(marker)
+            try finishDiscardRecovery(
+                marker: marker,
+                markerData: markerData,
+                paths: paths
+            )
+            return
+        }
 
         if hasTransaction {
             if hasPrevious {
@@ -445,12 +794,44 @@ public actor FileRecoveryStore: RecoveryStoring {
                     originalFailure: FileRecoveryInterruption.interruptedTransaction
                 )
             } else {
-                try restorePreviousGeneration(
+                let transactionGeneration = try readVerifiedEnvelope(
                     documentID: documentID,
-                    paths: paths,
-                    previousGeneration: nil,
-                    originalFailure: FileRecoveryInterruption.interruptedFirstGeneration
+                    url: paths.transaction
                 )
+                if hasCanonical {
+                    let canonicalGeneration = try readVerifiedEnvelope(
+                        documentID: documentID,
+                        url: paths.canonical
+                    )
+                    guard canonicalGeneration == transactionGeneration else {
+                        throw FileRecoveryStoreError.checkpointContentMismatch(
+                            documentID,
+                            paths.canonical
+                        )
+                    }
+                    try removeArtifactIfPresent(
+                        documentID: documentID,
+                        url: paths.staging
+                    )
+                    try removeArtifactIfPresent(
+                        documentID: documentID,
+                        url: paths.transaction
+                    )
+                } else {
+                    try writeProtectedEnvelope(
+                        data: transactionGeneration.data,
+                        envelope: transactionGeneration.envelope,
+                        url: paths.canonical
+                    )
+                    try removeArtifactIfPresent(
+                        documentID: documentID,
+                        url: paths.staging
+                    )
+                    try removeArtifactIfPresent(
+                        documentID: documentID,
+                        url: paths.transaction
+                    )
+                }
             }
             return
         }
@@ -518,13 +899,36 @@ public actor FileRecoveryStore: RecoveryStoring {
         documentID: DocumentID,
         url: URL
     ) throws {
-        guard fileManager.fileExists(atPath: url.path) else {
+        guard try recoveryArtifactExists(documentID: documentID, url: url) else {
             return
         }
         do {
             try fileManager.removeItem(at: url)
         } catch {
             throw FileRecoveryStoreError.couldNotRemoveRecoveryArtifact(
+                documentID,
+                url,
+                String(describing: error)
+            )
+        }
+    }
+
+    private func recoveryArtifactExists(
+        documentID: DocumentID,
+        url: URL
+    ) throws -> Bool {
+        do {
+            _ = try fileManager.attributesOfItem(atPath: url.path)
+            return true
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain
+                && (
+                    error.code == CocoaError.Code.fileNoSuchFile.rawValue
+                        || error.code == CocoaError.Code.fileReadNoSuchFile.rawValue
+                ) {
+            return false
+        } catch {
+            throw FileRecoveryStoreError.couldNotReadRecoveryMetadata(
                 documentID,
                 url,
                 String(describing: error)
@@ -566,6 +970,19 @@ public actor FileRecoveryStore: RecoveryStoring {
         documentID: DocumentID,
         url: URL
     ) throws -> (data: Data, envelope: RecoveryEnvelope) {
+        let serializedByteCount = try recoveryFileByteCount(
+            documentID: documentID,
+            url: url
+        )
+        guard serializedByteCount <= maximumRecoverySerializedByteCount else {
+            throw FileRecoveryStoreError.checkpointExceedsMaximumSize(
+                documentID,
+                actualByteCount: serializedByteCount,
+                maximumByteCount: maximumRecoverySerializedByteCount,
+                url
+            )
+        }
+
         let data: Data
         do {
             data = try Data(contentsOf: url)
@@ -574,6 +991,25 @@ public actor FileRecoveryStore: RecoveryStoring {
                 documentID,
                 url,
                 String(describing: error)
+            )
+        }
+
+        let formatHeader: RecoveryFormatHeader
+        do {
+            formatHeader = try JSONDecoder().decode(RecoveryFormatHeader.self, from: data)
+        } catch {
+            throw FileRecoveryStoreError.couldNotDecodeCheckpoint(
+                documentID,
+                url,
+                String(describing: error)
+            )
+        }
+        guard formatHeader.formatVersion == RecoveryEnvelope.currentFormatVersion else {
+            throw FileRecoveryStoreError.unsupportedCheckpointVersion(
+                documentID,
+                expected: RecoveryEnvelope.currentFormatVersion,
+                actual: formatHeader.formatVersion,
+                url
             )
         }
 
@@ -587,14 +1023,6 @@ public actor FileRecoveryStore: RecoveryStoring {
                 String(describing: error)
             )
         }
-        guard envelope.formatVersion == RecoveryEnvelope.currentFormatVersion else {
-            throw FileRecoveryStoreError.unsupportedCheckpointVersion(
-                documentID,
-                expected: RecoveryEnvelope.currentFormatVersion,
-                actual: envelope.formatVersion,
-                url
-            )
-        }
         guard envelope.documentID == documentID else {
             throw FileRecoveryStoreError.checkpointDocumentMismatch(
                 expected: documentID,
@@ -602,7 +1030,83 @@ public actor FileRecoveryStore: RecoveryStoring {
                 url
             )
         }
-        return (data, envelope)
+        try validateEnvelopeBounds(envelope: envelope, url: url)
+        return (data, recoveryEnvelopeForUse(envelope))
+    }
+
+    private func recoveryFileByteCount(
+        documentID: DocumentID,
+        url: URL
+    ) throws -> UInt64 {
+        do {
+            let values = try url.resourceValues(
+                forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
+            )
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true else {
+                throw FileRecoveryStoreError.recoveryItemHasUnexpectedType(
+                    documentID,
+                    url
+                )
+            }
+            guard let fileSize = values.fileSize, fileSize >= 0 else {
+                throw FileRecoveryStoreError.couldNotReadRecoveryMetadata(
+                    documentID,
+                    url,
+                    "Recovery file size is unavailable."
+                )
+            }
+            return UInt64(fileSize)
+        } catch let error as FileRecoveryStoreError {
+            throw error
+        } catch {
+            throw FileRecoveryStoreError.couldNotReadRecoveryMetadata(
+                documentID,
+                url,
+                String(describing: error)
+            )
+        }
+    }
+
+    private func validateEnvelopeBounds(
+        envelope: RecoveryEnvelope,
+        url: URL
+    ) throws {
+        let contentByteCount = UInt64(envelope.text.utf8.count)
+        guard contentByteCount <= maximumRecoveryContentByteCount else {
+            throw FileRecoveryStoreError.checkpointContentExceedsMaximumSize(
+                envelope.documentID,
+                actualByteCount: contentByteCount,
+                maximumByteCount: maximumRecoveryContentByteCount,
+                url
+            )
+        }
+
+        let metadataEnvelope = RecoveryEnvelope(
+            formatVersion: envelope.formatVersion,
+            documentID: envelope.documentID,
+            title: envelope.title,
+            text: "",
+            editedAt: envelope.editedAt
+        )
+        let metadataByteCount: UInt64
+        do {
+            metadataByteCount = UInt64(try JSONEncoder().encode(metadataEnvelope).count)
+        } catch {
+            throw FileRecoveryStoreError.couldNotDecodeCheckpoint(
+                envelope.documentID,
+                url,
+                String(describing: error)
+            )
+        }
+        guard metadataByteCount <= maximumRecoveryMetadataByteCount else {
+            throw FileRecoveryStoreError.checkpointMetadataExceedsMaximumSize(
+                envelope.documentID,
+                actualByteCount: metadataByteCount,
+                maximumByteCount: maximumRecoveryMetadataByteCount,
+                url
+            )
+        }
     }
 
     private func verifyStoredEnvelope(
@@ -710,15 +1214,178 @@ private struct RecoveryTransactionPaths {
     let previous: URL
 }
 
+private struct RecoveryCleanupMarker: Codable, Equatable {
+    static let currentFormatVersion: UInt = 1
+    static let expectedKind = "phonepad.recovery.cleanup"
+    static let discardAction = "discard"
+
+    let formatVersion: UInt
+    let kind: String
+    let documentID: DocumentID
+    let action: String
+
+    var isCurrentDiscard: Bool {
+        formatVersion == Self.currentFormatVersion
+            && kind == Self.expectedKind
+            && action == Self.discardAction
+    }
+
+    init(documentID: DocumentID) {
+        formatVersion = Self.currentFormatVersion
+        kind = Self.expectedKind
+        self.documentID = documentID
+        action = Self.discardAction
+    }
+}
+
+private struct RecoveryFormatHeader: Decodable {
+    let formatVersion: UInt
+}
+
 private enum FileRecoveryInterruption: Error {
     case interruptedTransaction
     case interruptedFirstGeneration
     case missingCanonical
 }
 
+private let maximumRecoveryContentByteCount: UInt64 = 75 * 1_024 * 1_024
+private let maximumRecoveryMetadataByteCount: UInt64 = 64 * 1_024
+private let maximumJSONEscapedBytesPerContentByte: UInt64 = 6
+private let maximumRecoverySerializedByteCount = maximumRecoveryContentByteCount
+    * maximumJSONEscapedBytesPerContentByte
+    + maximumRecoveryMetadataByteCount
+private let maximumRecoveryCleanupMarkerByteCount = maximumRecoveryMetadataByteCount
+
 private func recoveryMessage(documentID: DocumentID?, message: String) -> String {
     guard let documentID else {
         return message
     }
     return "Document \(documentID.rawValue): \(message)"
+}
+
+private func canonicalDocumentID(filename: String) -> DocumentID? {
+    let suffix = ".recovery.json"
+    guard filename.hasSuffix(suffix) else {
+        return nil
+    }
+    let identifier = String(filename.dropLast(suffix.count))
+    return recoveryDocumentID(identifier: identifier)
+}
+
+private func recoveryArtifactDocumentID(filename: String) -> DocumentID? {
+    if let canonicalDocumentID = canonicalDocumentID(filename: filename) {
+        return canonicalDocumentID
+    }
+
+    let sidecarSuffixes = [
+        ".recovery.staging",
+        ".recovery.transaction",
+        ".recovery.previous",
+    ]
+    guard filename.first == "." else {
+        return nil
+    }
+    for suffix in sidecarSuffixes where filename.hasSuffix(suffix) {
+        let identifier = String(filename.dropFirst().dropLast(suffix.count))
+        return recoveryDocumentID(identifier: identifier)
+    }
+    return nil
+}
+
+private func recoveryDocumentID(identifier: String) -> DocumentID? {
+    guard identifier.count == 36,
+          identifier == identifier.lowercased(),
+          let uuid = UUID(uuidString: identifier),
+          uuid.uuidString.lowercased() == identifier else {
+        return nil
+    }
+    return DocumentID(rawValue: uuid)
+}
+
+private func recoveryDisplayTitle(_ title: String) -> String {
+    let leaf = (title as NSString).lastPathComponent
+    let singleLine = leaf
+        .components(separatedBy: .newlines)
+        .joined(separator: " ")
+    let withoutControls = String(
+        singleLine.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0)
+        }
+    )
+    let trimmed = withoutControls.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty else {
+        return "Recovered Document"
+    }
+    return String(trimmed.prefix(255))
+}
+
+private func recoveryEnvelopeForUse(_ envelope: RecoveryEnvelope) -> RecoveryEnvelope {
+    RecoveryEnvelope(
+        formatVersion: envelope.formatVersion,
+        documentID: envelope.documentID,
+        title: recoveryDisplayTitle(envelope.title),
+        text: envelope.text,
+        editedAt: envelope.editedAt
+    )
+}
+
+private func recoveryFailureSummary(
+    error: FileRecoveryStoreError,
+    documentID: DocumentID
+) -> RecoveryItemSummary? {
+    switch error {
+    case let .unsupportedCheckpointVersion(_, _, actual, _):
+        return RecoveryItemSummary(
+            documentID: documentID,
+            title: "Recovered Document",
+            lastEdited: .unavailable,
+            status: .unsupportedVersion(actual)
+        )
+    case .couldNotReadCheckpoint,
+         .couldNotReadRecoveryMetadata,
+         .backupExclusionVerificationFailed,
+         .fileProtectionVerificationFailed:
+        return RecoveryItemSummary(
+            documentID: documentID,
+            title: "Recovered Document",
+            lastEdited: .unavailable,
+            status: .unavailable
+        )
+    case .couldNotDecodeCheckpoint,
+         .checkpointExceedsMaximumSize,
+         .checkpointContentExceedsMaximumSize,
+         .checkpointMetadataExceedsMaximumSize,
+         .checkpointIsNotRegularFile,
+         .recoveryItemHasUnexpectedType,
+         .checkpointContentMismatch,
+         .checkpointDocumentMismatch:
+        return RecoveryItemSummary(
+            documentID: documentID,
+            title: "Recovered Document",
+            lastEdited: .unavailable,
+            status: .corrupt
+        )
+    default:
+        return nil
+    }
+}
+
+private func recoverySummaryComesBefore(
+    _ left: RecoveryItemSummary,
+    _ right: RecoveryItemSummary
+) -> Bool {
+    switch (left.lastEdited, right.lastEdited) {
+    case let (.available(leftDate), .available(rightDate)):
+        if leftDate != rightDate {
+            return leftDate > rightDate
+        }
+    case (.available, .unavailable):
+        return true
+    case (.unavailable, .available):
+        return false
+    case (.unavailable, .unavailable):
+        break
+    }
+    return left.documentID.rawValue.uuidString
+        < right.documentID.rawValue.uuidString
 }

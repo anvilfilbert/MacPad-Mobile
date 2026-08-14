@@ -104,6 +104,31 @@ public func makeInitialPhonePadState(
     return PhonePadState(tabs: [tab], activeTabID: tabID)
 }
 
+public func recoverDocument(
+    state: PhonePadState,
+    envelope: RecoveryEnvelope,
+    tabID: TabID
+) -> PhonePadState {
+    if let existingTab = state.tabs.first(where: {
+        $0.document.id == envelope.documentID
+    }) {
+        return PhonePadState(tabs: state.tabs, activeTabID: existingTab.id)
+    }
+
+    let document = PhonePadDocument(
+        id: envelope.documentID,
+        title: envelope.title,
+        text: envelope.text,
+        isUnsaved: true,
+        recoveryState: .protectedUnsaved
+    )
+    let recoveredTab = PhonePadTab(id: tabID, document: document)
+    return PhonePadState(
+        tabs: state.tabs + [recoveredTab],
+        activeTabID: recoveredTab.id
+    )
+}
+
 public func beginActiveDocumentEdit(
     state: PhonePadState,
     newText: String,

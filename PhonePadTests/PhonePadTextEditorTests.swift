@@ -15,9 +15,13 @@ private final class EditorTestModel: ObservableObject {
 @MainActor
 private struct EditorHarness: View {
     @ObservedObject var model: EditorTestModel
+    let transitionController: PhonePadEditorTransitionController
 
     var body: some View {
-        PhonePadTextEditor(text: $model.text)
+        PhonePadTextEditor(
+            text: $model.text,
+            transitionController: transitionController
+        )
     }
 }
 
@@ -25,6 +29,7 @@ private struct EditorHarness: View {
 private struct HostedEditor {
     let model: EditorTestModel
     let controller: UIHostingController<EditorHarness>
+    let transitionController: PhonePadEditorTransitionController
     let window: UIWindow
     let textView: UITextView
 }
@@ -119,6 +124,30 @@ final class PhonePadTextEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testTransitionCommitSynchronouslyPublishesMarkedTextBeforeDocumentChange() throws {
+        let fixture = try makeHostedEditor(text: "ab")
+        defer { destroy(fixture) }
+
+        fixture.textView.selectedRange = NSRange(location: 2, length: 0)
+        fixture.textView.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 1, length: 0)
+        )
+        render(fixture.controller)
+        let displayedComposition = try XCTUnwrap(fixture.textView.text)
+
+        fixture.model.text = "stale model text"
+        render(fixture.controller)
+        XCTAssertNotEqual(fixture.model.text, displayedComposition)
+        XCTAssertNotNil(fixture.textView.markedTextRange)
+
+        try fixture.transitionController.commitMarkedText()
+
+        XCTAssertNil(fixture.textView.markedTextRange)
+        XCTAssertEqual(fixture.model.text, displayedComposition)
+    }
+
+    @MainActor
     private func makeHostedEditor(text: String) throws -> HostedEditor {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
@@ -126,7 +155,13 @@ final class PhonePadTextEditorTests: XCTestCase {
         }
 
         let model = EditorTestModel(text: text)
-        let controller = UIHostingController(rootView: EditorHarness(model: model))
+        let transitionController = PhonePadEditorTransitionController()
+        let controller = UIHostingController(
+            rootView: EditorHarness(
+                model: model,
+                transitionController: transitionController
+            )
+        )
         let window = UIWindow(windowScene: scene)
         window.rootViewController = controller
         window.makeKeyAndVisible()
@@ -142,6 +177,7 @@ final class PhonePadTextEditorTests: XCTestCase {
         return HostedEditor(
             model: model,
             controller: controller,
+            transitionController: transitionController,
             window: window,
             textView: textView
         )

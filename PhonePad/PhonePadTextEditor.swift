@@ -1,11 +1,52 @@
 import SwiftUI
 import UIKit
 
+@MainActor
+final class PhonePadEditorTransitionController {
+    private weak var textView: UITextView?
+    private weak var coordinator: PhonePadTextEditor.Coordinator?
+
+    init() {}
+
+    func commitMarkedText() throws {
+        guard let textView,
+              let coordinator else {
+            throw PhonePadEditorTransitionError.editorUnavailable
+        }
+        textView.unmarkText()
+        coordinator.synchronizeForDocumentTransition(in: textView)
+    }
+
+    fileprivate func connect(
+        textView: UITextView,
+        coordinator: PhonePadTextEditor.Coordinator
+    ) {
+        self.textView = textView
+        self.coordinator = coordinator
+    }
+}
+
+enum PhonePadEditorTransitionError: Error, LocalizedError {
+    case editorUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .editorUnavailable:
+            "Editor is unavailable. Keep the current Document open and retry."
+        }
+    }
+}
+
 struct PhonePadTextEditor: UIViewRepresentable {
     @Binding private var text: String
+    private let transitionController: PhonePadEditorTransitionController
 
-    init(text: Binding<String>) {
+    init(
+        text: Binding<String>,
+        transitionController: PhonePadEditorTransitionController
+    ) {
         _text = text
+        self.transitionController = transitionController
     }
 
     func makeCoordinator() -> Coordinator {
@@ -24,6 +65,10 @@ struct PhonePadTextEditor: UIViewRepresentable {
         textView.alwaysBounceVertical = true
         textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         textView.accessibilityIdentifier = "phonepad.editor.text-view"
+        transitionController.connect(
+            textView: textView,
+            coordinator: context.coordinator
+        )
         return textView
     }
 
@@ -115,6 +160,12 @@ struct PhonePadTextEditor: UIViewRepresentable {
             }
 
             _ = reconcileCommittedComposition(in: textView)
+        }
+
+        func synchronizeForDocumentTransition(in textView: UITextView) {
+            compositionIsActive = false
+            deferredModelText = nil
+            synchronizeBinding(with: textView)
         }
 
         private func synchronizeBinding(with textView: UITextView) {

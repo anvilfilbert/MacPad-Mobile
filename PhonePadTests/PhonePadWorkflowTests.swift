@@ -20,6 +20,84 @@ final class PhonePadWorkflowTests: XCTestCase {
         XCTAssertEqual(state.activeTab.document.recoveryState, .clean)
     }
 
+    func testRecoverCreatesAProtectedUnsavedTabWithoutReplacingFreshLaunchTab() {
+        let initialDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        )
+        let initialTabID = TabID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        )
+        let recoveredDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!
+        )
+        let recoveredTabID = TabID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000104")!
+        )
+        let initialState = makeInitialPhonePadState(
+            documentID: initialDocumentID,
+            tabID: initialTabID
+        )
+        let envelope = RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: recoveredDocumentID,
+            title: "Untitled 2",
+            text: "Preserved text",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_000)
+        )
+
+        let recoveredState = recoverDocument(
+            state: initialState,
+            envelope: envelope,
+            tabID: recoveredTabID
+        )
+
+        XCTAssertEqual(recoveredState.tabs.count, 2)
+        XCTAssertEqual(recoveredState.tabs[0], initialState.activeTab)
+        XCTAssertEqual(recoveredState.activeTabID, recoveredTabID)
+        XCTAssertEqual(recoveredState.activeTab.document.id, recoveredDocumentID)
+        XCTAssertEqual(recoveredState.activeTab.document.title, "Untitled 2")
+        XCTAssertEqual(recoveredState.activeTab.document.text, "Preserved text")
+        XCTAssertTrue(recoveredState.activeTab.document.isUnsaved)
+        XCTAssertEqual(recoveredState.activeTab.document.recoveryState, .protectedUnsaved)
+    }
+
+    func testRecoverActivatesAnExistingRecoveredDocumentWithoutDuplicatingIt() {
+        let recoveredDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000105")!
+        )
+        let firstTabID = TabID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000106")!
+        )
+        let ignoredTabID = TabID(
+            rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000107")!
+        )
+        let envelope = RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: recoveredDocumentID,
+            title: "Untitled",
+            text: "Preserved text",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_000)
+        )
+        let initialState = makeInitialPhonePadState(
+            documentID: DocumentID(rawValue: UUID()),
+            tabID: TabID(rawValue: UUID())
+        )
+        let firstRecovery = recoverDocument(
+            state: initialState,
+            envelope: envelope,
+            tabID: firstTabID
+        )
+
+        let secondRecovery = recoverDocument(
+            state: firstRecovery,
+            envelope: envelope,
+            tabID: ignoredTabID
+        )
+
+        XCTAssertEqual(secondRecovery.tabs, firstRecovery.tabs)
+        XCTAssertEqual(secondRecovery.activeTabID, firstTabID)
+    }
+
     func testFirstEditCreatesCompleteProtectedRecoveryCheckpoint() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

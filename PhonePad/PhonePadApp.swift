@@ -11,8 +11,10 @@ struct PhonePadApp: App {
         )[0]
         _model = StateObject(
             wrappedValue: PhonePadAppModel(
-                recoveryRootURL: applicationSupportURL
-                    .appendingPathComponent("Recovery", isDirectory: true)
+                recoveryRootURL: phonePadRecoveryRootURL(
+                    applicationSupportURL: applicationSupportURL,
+                    environment: ProcessInfo.processInfo.environment
+                )
             )
         )
     }
@@ -22,4 +24,21 @@ struct PhonePadApp: App {
             PhonePadRootView(model: model)
         }
     }
+}
+
+private func phonePadRecoveryRootURL(
+    applicationSupportURL: URL,
+    environment: [String: String]
+) -> URL {
+    #if DEBUG
+    if let namespace = environment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"],
+       let identifier = UUID(uuidString: namespace) {
+        return applicationSupportURL
+            .appendingPathComponent("UITestRecovery", isDirectory: true)
+            .appendingPathComponent(identifier.uuidString.lowercased(), isDirectory: true)
+    }
+    #endif
+
+    return applicationSupportURL
+        .appendingPathComponent("Recovery", isDirectory: true)
 }
