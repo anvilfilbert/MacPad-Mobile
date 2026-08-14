@@ -35,6 +35,7 @@ private enum PendingFileSaveCleanup {
 private enum PhonePadRecoveryActionError: Error, LocalizedError {
     case actionAlreadyInProgress
     case checkpointMustFinishBeforeRecovering
+    case checkpointHeldForFileConflictReload
     case recoveryItemCannotBeRecovered
     case recoveryItemMissing
 
@@ -44,6 +45,8 @@ private enum PhonePadRecoveryActionError: Error, LocalizedError {
             "Another recovery action is still running. Wait for it to finish and retry."
         case .checkpointMustFinishBeforeRecovering:
             "Current edits could not be protected. Resolve the recovery error before opening preserved work."
+        case .checkpointHeldForFileConflictReload:
+            "Current edits remain locked until Reload Current finishes. Retry Reload Current or retry recovery before editing."
         case .recoveryItemCannotBeRecovered:
             "This preserved work is corrupt or unsupported. Keep it for a compatible PhonePad version, or choose Discard Recovery."
         case .recoveryItemMissing:
@@ -87,6 +90,8 @@ final class PhonePadAppModel: ObservableObject {
     @Published private(set) var fileSaveInProgress: Bool
     @Published private(set) var fileSaveCleanupRequired: Bool
     @Published private(set) var pendingSaveAsReplacement: PreparedSaveAsPreflight?
+    @Published private(set) var fileConflictResolutionIsPresented: Bool
+    @Published private(set) var fileConflictError: String?
 
     private let recoveryStore: FileRecoveryStore
     private let fileAccessConnector: FileAccessConnector
@@ -97,6 +102,10 @@ final class PhonePadAppModel: ObservableObject {
     private var pendingCheckpoint: PendingRecoveryCheckpoint?
     private var failedCheckpoint: PendingRecoveryCheckpoint?
     private var pendingFileSaveCleanup: PendingFileSaveCleanup?
+    private var presentationHintTask: Task<Void, Never>?
+    private var presentersShouldBeActive: Bool
+    private var presenterLifecycleGeneration: UInt64
+    private var presenterRefreshPending: Bool
     private var editGeneration: UInt64
 
     init(
@@ -123,10 +132,21 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveInProgress = false
         fileSaveCleanupRequired = false
         pendingSaveAsReplacement = nil
+        fileConflictResolutionIsPresented = false
+        fileConflictError = nil
         pendingCheckpoint = nil
         failedCheckpoint = nil
         pendingFileSaveCleanup = nil
+        presentationHintTask = nil
+        presentersShouldBeActive = true
+        presenterLifecycleGeneration = 0
+        presenterRefreshPending = false
         editGeneration = 0
+        startPresentationHintTask()
+    }
+
+    deinit {
+        presentationHintTask?.cancel()
     }
 
     convenience init(
@@ -173,6 +193,10 @@ final class PhonePadAppModel: ObservableObject {
         state.activeTab.document.text
     }
 
+    var activeFileConflict: FileConflict? {
+        state.activeTab.document.fileConflict
+    }
+
     var fileMutationDisabled: Bool {
         fileSaveInProgress
             || fileSaveCleanupRequired
@@ -214,23 +238,56 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveInProgress = true
         fileSaveError = nil
         fileSaveNotice = nil
-        defer { fileSaveInProgress = false }
+        defer { finishFileMutation() }
 
         guard await currentDocumentIsReadyForFileTransition() else {
             return false
         }
 
         do {
-            let openedFile = try await fileAccessConnector.openTextFile(
-                at: selectedURL
+            let documentID = DocumentID(rawValue: UUID())
+            let snapshot = try await fileAccessConnector.openTextFile(
+                at: selectedURL,
+                documentID: documentID
             )
-            state = openBoundDocument(
+            let openedState = openObservedBoundDocument(
                 state: state,
-                documentID: DocumentID(rawValue: UUID()),
+                documentID: documentID,
                 tabID: TabID(rawValue: UUID()),
-                text: openedFile.text,
-                fileBinding: openedFile.binding
+                text: snapshot.openedFile.text,
+                observation: ObservedBoundFile(
+                    binding: snapshot.openedFile.binding,
+                    providerConflictVersions: snapshot.providerConflictVersions
+                )
             )
+            if !openedState.tabs.contains(where: {
+                $0.document.id == documentID
+            }) {
+                let retainedDocument = openedState.activeTab.document
+                guard let retainedBinding = retainedDocument.fileBinding else {
+                    await fileAccessConnector.stopPresenting(
+                        documentID: documentID
+                    )
+                    throw PhonePadStateError.documentIsNotBound(
+                        retainedDocument.id
+                    )
+                }
+                do {
+                    try await fileAccessConnector.startPresenting(
+                        documentID: retainedDocument.id,
+                        binding: retainedBinding
+                    )
+                } catch {
+                    await fileAccessConnector.stopPresenting(
+                        documentID: documentID
+                    )
+                    throw error
+                }
+                presenterRefreshPending = true
+                await fileAccessConnector.stopPresenting(documentID: documentID)
+            }
+            state = openedState
+            presentActiveFileConflictIfNeeded()
             fileSaveError = nil
             fileSaveNotice = nil
             return true
@@ -280,7 +337,7 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveInProgress = true
         fileSaveError = nil
         fileSaveNotice = nil
-        defer { fileSaveInProgress = false }
+        defer { finishFileMutation() }
 
         do {
             let preflight = try await preflightPreparedSaveAs(
@@ -308,6 +365,255 @@ final class PhonePadAppModel: ObservableObject {
         pendingSaveAsReplacement = nil
     }
 
+    func presentFileConflictResolution() {
+        guard state.activeTab.document.fileConflict != nil else {
+            return
+        }
+        fileConflictError = nil
+        fileConflictResolutionIsPresented = true
+    }
+
+    func cancelFileConflictResolution() {
+        fileConflictResolutionIsPresented = false
+        fileConflictError = nil
+    }
+
+    @discardableResult
+    func beginSaveAsFromFileConflict() -> Bool {
+        guard state.activeTab.document.fileConflict != nil else {
+            fileConflictError = FileConflictWorkflowError
+                .fileConflictRequired(state.activeTab.document.id)
+                .localizedDescription
+            return false
+        }
+        fileConflictResolutionIsPresented = false
+        fileConflictError = nil
+        return true
+    }
+
+    func reportFileConflictTransitionError(_ error: Error) {
+        fileConflictError = error.localizedDescription
+    }
+
+    @discardableResult
+    func discardEditsAndReloadCurrentFile() async -> Bool {
+        guard !fileSaveCleanupRequired else {
+            fileConflictError = PhonePadFileSaveActionError
+                .cleanupRequired
+                .localizedDescription
+            return false
+        }
+        guard !fileSaveInProgress else {
+            fileConflictError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        let documentID = state.activeTab.document.id
+        guard state.activeTab.document.fileConflict != nil else {
+            fileConflictError = FileConflictWorkflowError
+                .fileConflictRequired(documentID)
+                .localizedDescription
+            return false
+        }
+
+        fileSaveInProgress = true
+        fileConflictError = nil
+        fileSaveError = nil
+        fileSaveNotice = nil
+        defer { finishFileMutation() }
+
+        await holdCurrentCheckpointForFileConflictReload()
+
+        do {
+            let result = try await reloadCurrentFileAfterDiscardingEdits(
+                state: state,
+                documentID: documentID,
+                fileAccessConnector: fileAccessConnector,
+                recoveryStore: recoveryStore
+            )
+            state = result.state
+            pendingCheckpoint = nil
+            failedCheckpoint = nil
+            recoveryError = nil
+            presenterRefreshPending = true
+            fileConflictError = nil
+            fileSaveError = nil
+            fileSaveNotice = result.recoveryCleanupPending
+                ? "Edits were discarded and current File content was reloaded. Protected cleanup remains and PhonePad will retry it on next recovery access."
+                : nil
+            fileConflictResolutionIsPresented = state.activeTab.document.fileConflict != nil
+            return true
+        } catch {
+            fileConflictError = error.localizedDescription
+            fileConflictResolutionIsPresented = true
+            return false
+        }
+    }
+
+    func reconcilePresentedFile(documentID: DocumentID) async {
+        guard presentersShouldBeActive else {
+            presenterRefreshPending = true
+            return
+        }
+        guard !fileSaveInProgress,
+              !fileSaveCleanupRequired else {
+            presenterRefreshPending = true
+            return
+        }
+        let lifecycleGeneration = presenterLifecycleGeneration
+        guard let document = state.tabs.first(where: {
+            $0.document.id == documentID
+        })?.document, let binding = document.fileBinding else {
+            await fileAccessConnector.stopPresenting(documentID: documentID)
+            return
+        }
+        let hadConflict = document.fileConflict != nil
+
+        do {
+            let observation = try await fileAccessConnector.reconcilePresentedFile(
+                documentID: documentID,
+                binding: binding
+            )
+            guard presentersShouldBeActive,
+                  presenterLifecycleGeneration == lifecycleGeneration else {
+                return
+            }
+            guard !fileSaveInProgress,
+                  !fileSaveCleanupRequired else {
+                presenterRefreshPending = true
+                return
+            }
+            guard state.tabs.first(where: {
+                $0.document.id == documentID
+            })?.document.fileBinding == binding else {
+                return
+            }
+            state = try reconcileBoundDocument(
+                state: state,
+                documentID: documentID,
+                observation: observation
+            )
+            if state.activeTab.document.id == documentID {
+                fileConflictError = nil
+                if !hadConflict,
+                   state.activeTab.document.fileConflict != nil {
+                    fileConflictResolutionIsPresented = true
+                }
+            }
+        } catch {
+            if state.activeTab.document.id == documentID {
+                fileConflictError = error.localizedDescription
+            }
+        }
+    }
+
+    func sceneBecameInactive() async {
+        presenterLifecycleGeneration += 1
+        let generation = presenterLifecycleGeneration
+        presentersShouldBeActive = false
+        if !fileSaveCleanupRequired {
+            presenterRefreshPending = false
+        }
+        await fileAccessConnector.pausePresenters()
+        guard presenterLifecycleGeneration == generation,
+              !presentersShouldBeActive else {
+            return
+        }
+        guard !fileSaveInProgress else {
+            return
+        }
+        _ = await retryCurrentCheckpointIfNeeded()
+    }
+
+    func sceneBecameActive() async {
+        presenterLifecycleGeneration += 1
+        let generation = presenterLifecycleGeneration
+        presentersShouldBeActive = true
+        await resumePresentersIfActive(generation: generation)
+    }
+
+    func retryActiveFileReconciliation() async {
+        fileConflictError = nil
+        await sceneBecameActive()
+    }
+
+    private func resumePresentersIfActive(generation: UInt64) async {
+        guard presentersShouldBeActive,
+              presenterLifecycleGeneration == generation else {
+            return
+        }
+        guard !fileSaveInProgress,
+              !fileSaveCleanupRequired else {
+            presenterRefreshPending = true
+            return
+        }
+        presenterRefreshPending = false
+        let registrations = state.tabs.compactMap { tab -> PresentedFileRegistration? in
+            guard let binding = tab.document.fileBinding else {
+                return nil
+            }
+            return PresentedFileRegistration(
+                documentID: tab.document.id,
+                binding: binding
+            )
+        }
+        let outcomes = await fileAccessConnector.resumePresenters(
+            bindings: registrations
+        )
+        guard presentersShouldBeActive,
+              presenterLifecycleGeneration == generation else {
+            return
+        }
+        guard !fileSaveInProgress,
+              !fileSaveCleanupRequired else {
+            presenterRefreshPending = true
+            return
+        }
+        var detectedActiveConflict = false
+        for registration in registrations {
+            guard !fileSaveInProgress,
+                  !fileSaveCleanupRequired,
+                  state.tabs.first(where: {
+                      $0.document.id == registration.documentID
+                  })?.document.fileBinding == registration.binding,
+                  let outcome = outcomes[registration.documentID] else {
+                continue
+            }
+            switch outcome {
+            case let .observed(observation):
+                do {
+                    let hadConflict = state.tabs.first(where: {
+                        $0.document.id == registration.documentID
+                    })?.document.fileConflict != nil
+                    state = try reconcileBoundDocument(
+                        state: state,
+                        documentID: registration.documentID,
+                        observation: observation
+                    )
+                    if state.activeTab.document.id == registration.documentID {
+                        fileConflictError = nil
+                        if !hadConflict,
+                           state.activeTab.document.fileConflict != nil {
+                            detectedActiveConflict = true
+                        }
+                    }
+                } catch {
+                    if state.activeTab.document.id == registration.documentID {
+                        fileConflictError = error.localizedDescription
+                    }
+                }
+            case let .failed(error):
+                if state.activeTab.document.id == registration.documentID {
+                    fileConflictError = error.localizedDescription
+                }
+            }
+        }
+        if detectedActiveConflict {
+            fileConflictResolutionIsPresented = true
+        }
+    }
+
     @discardableResult
     func completePreflightedSaveAs(
         _ preflight: PreparedSaveAsPreflight
@@ -329,7 +635,7 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveError = nil
         fileSaveNotice = nil
         defer {
-            fileSaveInProgress = false
+            finishFileMutation()
             pendingSaveAsReplacement = nil
         }
 
@@ -367,6 +673,17 @@ final class PhonePadAppModel: ObservableObject {
             }
             applyCompletedSaveAs(result)
             return true
+        } catch let error as FileAccessConnectorError {
+            if case .currentFile = preflight.target,
+               let conflict = error.underlyingFileConflict {
+                applyDetectedFileConflict(
+                    documentID: preflight.preparedSave.documentID,
+                    conflict: conflict
+                )
+            } else {
+                applySaveAsFailure(error)
+            }
+            return false
         } catch {
             applySaveAsFailure(error)
             return false
@@ -398,7 +715,7 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveError = nil
         fileSaveNotice = nil
         defer {
-            fileSaveInProgress = false
+            finishFileMutation()
             pendingSaveAsReplacement = nil
         }
 
@@ -430,10 +747,13 @@ final class PhonePadAppModel: ObservableObject {
 
     private func applyCompletedSaveAs(_ result: SaveAsResult) {
         state = result.state
+        presenterRefreshPending = true
         pendingFileSaveCleanup = nil
         fileSaveCleanupRequired = false
         fileSaveError = nil
         fileSaveNotice = fileSaveNoticeText(result.notice)
+        fileConflictResolutionIsPresented = false
+        fileConflictError = nil
     }
 
     private func applySaveAsFailure(_ error: Error) {
@@ -465,6 +785,13 @@ final class PhonePadAppModel: ObservableObject {
                 .localizedDescription
             return false
         }
+        guard state.activeTab.document.fileConflict == nil else {
+            fileSaveError = nil
+            fileSaveNotice = nil
+            fileConflictError = nil
+            fileConflictResolutionIsPresented = true
+            return false
+        }
         guard state.activeTab.document.isUnsaved else {
             clearFileSaveFeedback()
             return true
@@ -473,7 +800,7 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveInProgress = true
         fileSaveError = nil
         fileSaveNotice = nil
-        defer { fileSaveInProgress = false }
+        defer { finishFileMutation() }
 
         do {
             let preparedSave = try prepareBoundFileSave(
@@ -513,6 +840,16 @@ final class PhonePadAppModel: ObservableObject {
             }
             fileSaveError = error.localizedDescription
             return false
+        } catch let error as FileAccessConnectorError {
+            if let conflict = error.underlyingFileConflict {
+                applyDetectedFileConflict(
+                    documentID: state.activeTab.document.id,
+                    conflict: conflict
+                )
+                return false
+            }
+            fileSaveError = error.localizedDescription
+            return false
         } catch {
             fileSaveError = error.localizedDescription
             return false
@@ -536,7 +873,7 @@ final class PhonePadAppModel: ObservableObject {
 
         fileSaveInProgress = true
         fileSaveError = nil
-        defer { fileSaveInProgress = false }
+        defer { finishFileMutation() }
 
         do {
             let terminalOutcome = try await recoveryStore.completeRecoveryAfterSave(
@@ -549,6 +886,7 @@ final class PhonePadAppModel: ObservableObject {
                     terminalOutcome: terminalOutcome
                 )
                 state = completedResult.state
+                presenterRefreshPending = true
                 fileSaveNotice = fileSaveNoticeText(completedResult.notice)
             case let .saveAs(result):
                 let completedResult = applyingSaveAsRecoveryTerminalOutcome(
@@ -556,6 +894,7 @@ final class PhonePadAppModel: ObservableObject {
                     terminalOutcome: terminalOutcome
                 )
                 state = completedResult.state
+                presenterRefreshPending = true
                 fileSaveNotice = fileSaveNoticeText(completedResult.notice)
             }
             self.pendingFileSaveCleanup = nil
@@ -729,7 +1068,7 @@ final class PhonePadAppModel: ObservableObject {
         pendingCheckpoint = PendingRecoveryCheckpoint(
             generation: editGeneration,
             previousState: previousState,
-            text: text,
+            text: transition.envelope.text,
             editedAt: transition.envelope.editedAt,
             firstPendingAt: existingCheckpoint?.firstPendingAt ?? now,
             lastEditAt: now,
@@ -749,17 +1088,35 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     private func retryCurrentCheckpointIfNeeded() async -> Bool {
+        await cancelAndAwaitCheckpointTask()
+        guard let checkpoint = failedCheckpoint ?? pendingCheckpoint else {
+            return state.activeTab.document.recoveryState != .checkpointPending
+        }
+        let outcome = await persist(checkpoint: checkpoint)
+        return outcome == .persisted
+    }
+
+    private func holdCurrentCheckpointForFileConflictReload() async {
+        await cancelAndAwaitCheckpointTask()
+        guard let checkpoint = failedCheckpoint ?? pendingCheckpoint else {
+            return
+        }
+        failedCheckpoint = checkpoint
+        pendingCheckpoint = nil
+        if recoveryError == nil {
+            recoveryError = PhonePadRecoveryActionError
+                .checkpointHeldForFileConflictReload
+                .localizedDescription
+        }
+    }
+
+    private func cancelAndAwaitCheckpointTask() async {
         let activeCheckpointTask = checkpointTask
         activeCheckpointTask?.cancel()
         if let activeCheckpointTask {
             await activeCheckpointTask.value
         }
         checkpointTask = nil
-        guard let checkpoint = failedCheckpoint ?? pendingCheckpoint else {
-            return state.activeTab.document.recoveryState != .checkpointPending
-        }
-        let outcome = await persist(checkpoint: checkpoint)
-        return outcome == .persisted
     }
 
     private func currentDocumentIsReadyForTransition() async -> Bool {
@@ -786,6 +1143,59 @@ final class PhonePadAppModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func startPresentationHintTask() {
+        let hints = fileAccessConnector.presentationChangeHints
+        presentationHintTask = Task { @MainActor [weak self] in
+            for await documentID in hints {
+                guard !Task.isCancelled else {
+                    return
+                }
+                await self?.reconcilePresentedFile(documentID: documentID)
+            }
+        }
+    }
+
+    private func finishFileMutation() {
+        fileSaveInProgress = false
+        guard presentersShouldBeActive,
+              !fileSaveCleanupRequired,
+              presenterRefreshPending else {
+            return
+        }
+        let generation = presenterLifecycleGeneration
+        Task { @MainActor [weak self] in
+            await self?.resumePresentersIfActive(generation: generation)
+        }
+    }
+
+    private func presentActiveFileConflictIfNeeded() {
+        guard state.activeTab.document.fileConflict != nil else {
+            return
+        }
+        fileConflictResolutionIsPresented = true
+    }
+
+    private func applyDetectedFileConflict(
+        documentID: DocumentID,
+        conflict: FileConflict
+    ) {
+        do {
+            state = try markDocumentFileConflict(
+                state: state,
+                documentID: documentID,
+                conflict: conflict
+            )
+            fileSaveError = nil
+            fileSaveNotice = nil
+            fileConflictError = nil
+            if state.activeTab.document.id == documentID {
+                fileConflictResolutionIsPresented = true
+            }
+        } catch {
+            fileSaveError = error.localizedDescription
+        }
     }
 
     private func runCheckpointLoop() async {
@@ -836,7 +1246,7 @@ final class PhonePadAppModel: ObservableObject {
         checkpoint: PendingRecoveryCheckpoint
     ) async -> RecoveryCheckpointPersistenceOutcome {
         do {
-            let updatedState = try await editActiveDocumentAndCheckpoint(
+            _ = try await editActiveDocumentAndCheckpoint(
                 state: checkpoint.previousState,
                 newText: checkpoint.text,
                 editedAt: checkpoint.editedAt,
@@ -845,7 +1255,12 @@ final class PhonePadAppModel: ObservableObject {
             guard !Task.isCancelled, editGeneration == checkpoint.generation else {
                 return .superseded
             }
-            state = updatedState
+            let documentID = checkpoint.previousState.activeTab.document.id
+            state = try markDocumentRecoveryProtected(
+                state: state,
+                documentID: documentID,
+                expectedText: checkpoint.text
+            )
             if pendingCheckpoint?.generation == checkpoint.generation {
                 pendingCheckpoint = nil
             }
@@ -903,5 +1318,20 @@ final class PhonePadAppModel: ObservableObject {
             )
         }
         return messages.joined(separator: " ")
+    }
+}
+
+private extension FileAccessConnectorError {
+    var underlyingFileConflict: FileConflict? {
+        switch self {
+        case let .fileConflict(conflict):
+            return conflict
+        case let .unsafeStagingCleanupRefused(_, precedingError),
+             let .stagingCleanupFailed(_, precedingError),
+             let .replacementStagingCleanupFailed(_, precedingError):
+            return precedingError.underlyingFileConflict
+        default:
+            return nil
+        }
     }
 }

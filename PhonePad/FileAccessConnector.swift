@@ -55,13 +55,6 @@ public enum SaveAsTargetCommitOutcome: Equatable, Sendable {
     case verifiedWithResidualCleanup(FileSaveOutcome, code: Int)
 }
 
-public enum BoundFileConflict: Equatable, Sendable {
-    case contentChanged
-    case stableIdentityChanged
-    case ambiguousLocatorChange
-    case unresolvedProviderVersions(count: Int)
-}
-
 public enum SaveAsRelocatedFileGeneration: Equatable, Sendable {
     case original
     case intended
@@ -105,6 +98,9 @@ public indirect enum FileAccessConnectorError: Error, Equatable, Sendable {
     case bookmarkCreationFailed(code: Int)
     case bookmarkResolutionFailed(code: Int)
     case bookmarkRefreshFailed(code: Int)
+    case filePresenterNotRegistered(documentID: DocumentID)
+    case duplicateFilePresenterRegistration(documentID: DocumentID)
+    case providerConflictVersionCountInvalid(count: Int)
     case collisionClaimBookmarkResolutionFailed(documentID: DocumentID, code: Int)
     case collisionClaimBookmarkIsStale(documentID: DocumentID)
     case saveAsTargetCollision(FileCollisionClaim)
@@ -118,7 +114,7 @@ public indirect enum FileAccessConnectorError: Error, Equatable, Sendable {
     case saveAsTargetHasUnresolvedProviderVersions(count: Int)
     case boundFileMissing
     case boundFileIsNotRegularFile(ExistingFileSystemItemKind)
-    case fileConflict(BoundFileConflict)
+    case fileConflict(FileConflict)
     case replacementStagingCreationFailed(code: Int)
     case replacementFailed(code: Int)
     case replacementOutcomeIndeterminate(code: Int)
@@ -195,6 +191,12 @@ extension FileAccessConnectorError: LocalizedError {
             return "Saved File access could not be resolved (system code \(code)). Locate the original File or use Save As."
         case let .bookmarkRefreshFailed(code):
             return "Updated File access could not be saved (system code \(code)). The original File was not changed."
+        case let .filePresenterNotRegistered(documentID):
+            return "File presentation for Document \(documentID.rawValue) is not active. Return PhonePad to the foreground and try again."
+        case let .duplicateFilePresenterRegistration(documentID):
+            return "File presentation received Document \(documentID.rawValue) more than once. No presenter was registered for that Document."
+        case let .providerConflictVersionCountInvalid(count):
+            return "File provider returned invalid unresolved-version count \(count). The File was not changed."
         case let .collisionClaimBookmarkResolutionFailed(documentID, code):
             return "File ownership for Document \(documentID.rawValue) could not be resolved (system code \(code)). No File was changed; retry Save As."
         case let .collisionClaimBookmarkIsStale(documentID):
@@ -256,7 +258,7 @@ extension FileAccessConnectorError: LocalizedError {
     }
 }
 
-private extension BoundFileConflict {
+private extension FileConflict {
     var description: String {
         switch self {
         case .contentChanged:
@@ -329,6 +331,7 @@ public actor FileAccessConnector {
         URL,
         FileManager
     ) throws -> URL
+    typealias UnresolvedVersionCountReader = @Sendable (URL) -> Int
 
     private let fileManager: FileManager
     private let bookmarkCreator: BookmarkCreator
@@ -338,8 +341,13 @@ public actor FileAccessConnector {
     private let saveAsStagingWriter: SaveAsStagingWriter
     private let saveAsStagingCleaner: SaveAsStagingCleaner
     private let saveAsRecoveryAccessorSourceProvider: SaveAsRecoveryAccessorSourceProvider
+    private let unresolvedVersionCountReader: UnresolvedVersionCountReader
+    public nonisolated let presentationChangeHints: AsyncStream<DocumentID>
+    private let presentationHintRelay: PresentationHintRelay
+    private var presentedFiles: [DocumentID: PresentedFile]
 
     public init(fileManager: FileManager) {
+        let presentationChanges = makePresentationChangeStream()
         self.fileManager = fileManager
         self.bookmarkCreator = createBookmarkData
         self.bookmarkResolver = resolveBookmark
@@ -348,12 +356,17 @@ public actor FileAccessConnector {
         self.saveAsStagingWriter = writeSaveAsStagingData
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
     }
 
     init(
         fileManager: FileManager,
         bookmarkCreator: @escaping BookmarkCreator
     ) {
+        let presentationChanges = makePresentationChangeStream()
         self.fileManager = fileManager
         self.bookmarkCreator = bookmarkCreator
         self.bookmarkResolver = resolveBookmark
@@ -362,6 +375,10 @@ public actor FileAccessConnector {
         self.saveAsStagingWriter = writeSaveAsStagingData
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
     }
 
     init(
@@ -371,6 +388,7 @@ public actor FileAccessConnector {
         identityReader: @escaping FileIdentityReader,
         replacer: @escaping FileReplacer
     ) {
+        let presentationChanges = makePresentationChangeStream()
         self.fileManager = fileManager
         self.bookmarkCreator = bookmarkCreator
         self.bookmarkResolver = bookmarkResolver
@@ -379,6 +397,10 @@ public actor FileAccessConnector {
         self.saveAsStagingWriter = writeSaveAsStagingData
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
     }
 
     init(
@@ -389,6 +411,7 @@ public actor FileAccessConnector {
         replacer: @escaping FileReplacer,
         saveAsRecoveryAccessorSourceProvider: @escaping SaveAsRecoveryAccessorSourceProvider
     ) {
+        let presentationChanges = makePresentationChangeStream()
         self.fileManager = fileManager
         self.bookmarkCreator = bookmarkCreator
         self.bookmarkResolver = bookmarkResolver
@@ -397,6 +420,34 @@ public actor FileAccessConnector {
         self.saveAsStagingWriter = writeSaveAsStagingData
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = saveAsRecoveryAccessorSourceProvider
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
+    }
+
+    init(
+        fileManager: FileManager,
+        bookmarkCreator: @escaping BookmarkCreator,
+        bookmarkResolver: @escaping BookmarkResolver,
+        identityReader: @escaping FileIdentityReader,
+        replacer: @escaping FileReplacer,
+        saveAsRecoveryAccessorSourceProvider: @escaping SaveAsRecoveryAccessorSourceProvider,
+        unresolvedVersionCountReader: @escaping UnresolvedVersionCountReader
+    ) {
+        let presentationChanges = makePresentationChangeStream()
+        self.fileManager = fileManager
+        self.bookmarkCreator = bookmarkCreator
+        self.bookmarkResolver = bookmarkResolver
+        self.identityReader = identityReader
+        self.replacer = replacer
+        self.saveAsStagingWriter = writeSaveAsStagingData
+        self.saveAsStagingCleaner = cleanSaveAsStaging
+        self.saveAsRecoveryAccessorSourceProvider = saveAsRecoveryAccessorSourceProvider
+        self.unresolvedVersionCountReader = unresolvedVersionCountReader
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
     }
 
     init(
@@ -405,6 +456,7 @@ public actor FileAccessConnector {
         saveAsStagingWriter: @escaping SaveAsStagingWriter,
         saveAsStagingCleaner: @escaping SaveAsStagingCleaner
     ) {
+        let presentationChanges = makePresentationChangeStream()
         self.fileManager = fileManager
         self.bookmarkCreator = bookmarkCreator
         self.bookmarkResolver = resolveBookmark
@@ -413,6 +465,22 @@ public actor FileAccessConnector {
         self.saveAsStagingWriter = saveAsStagingWriter
         self.saveAsStagingCleaner = saveAsStagingCleaner
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
+    }
+
+    deinit {
+        for presenter in presentedFiles.values {
+            presenter.deactivate()
+            presentationHintRelay.deactivate(
+                documentID: presenter.documentID,
+                generation: presenter.generation
+            )
+            NSFileCoordinator.removeFilePresenter(presenter)
+        }
+        presentationHintRelay.finish()
     }
 
     public func preflightSaveAsTarget(
@@ -811,6 +879,216 @@ public actor FileAccessConnector {
         }
     }
 
+    public func openTextFile(
+        at selectedURL: URL,
+        documentID: DocumentID
+    ) throws -> PresentedTextFileSnapshot {
+        let didStartSecurityScope = selectedURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        try requireSelectedOpenCandidate(at: selectedURL, fileManager: fileManager)
+        let presenter = registerPresenter(
+            documentID: documentID,
+            url: selectedURL
+        )
+        var shouldRetainPresenter = false
+        defer {
+            if !shouldRetainPresenter {
+                removePresenter(documentID: documentID)
+            }
+        }
+
+        let fileManagerReference = FileManagerReference(fileManager: fileManager)
+        let bookmarkCreator = bookmarkCreator
+        let identityReader = identityReader
+        let unresolvedVersionCountReader = unresolvedVersionCountReader
+        let snapshot = try presenter.performSynchronousAccess {
+            let snapshot = try coordinatePresentedTextFileRead(
+                at: selectedURL,
+                presenter: presenter,
+                fileManager: fileManagerReference.fileManager,
+                bookmarkCreator: bookmarkCreator,
+                identityReader: identityReader,
+                unresolvedVersionCountReader: unresolvedVersionCountReader
+            )
+            presenter.updatePresentedItemURL(snapshot.openedFile.binding.locatorURL)
+            return snapshot
+        }
+        shouldRetainPresenter = true
+        return snapshot
+    }
+
+    public func stopPresenting(documentID: DocumentID) {
+        removePresenter(documentID: documentID)
+    }
+
+    public func startPresenting(
+        documentID: DocumentID,
+        binding: FileBinding
+    ) throws {
+        let resolvedBookmark = try resolvePresentedFileBookmark(
+            binding: binding,
+            bookmarkResolver: bookmarkResolver
+        )
+        let resolvedURL = resolvedBookmark.url
+        let didStartSecurityScope = resolvedURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        _ = registerPresenter(documentID: documentID, url: resolvedURL)
+    }
+
+    public func pausePresenters() {
+        let registeredDocumentIDs = Array(presentedFiles.keys)
+        for documentID in registeredDocumentIDs {
+            removePresenter(documentID: documentID)
+        }
+    }
+
+    public func resumePresenters(
+        bindings: [PresentedFileRegistration]
+    ) -> [DocumentID: PresentedFileResumeOutcome] {
+        pausePresenters()
+        let duplicateDocumentIDs = duplicatedPresentedDocumentIDs(
+            registrations: bindings
+        )
+        var outcomes: [DocumentID: PresentedFileResumeOutcome] = [:]
+        for documentID in duplicateDocumentIDs {
+            outcomes[documentID] = .failed(
+                .duplicateFilePresenterRegistration(documentID: documentID)
+            )
+        }
+
+        var resolvedRegistrations: [ResolvedPresentedFileRegistration] = []
+        for registration in bindings
+        where !duplicateDocumentIDs.contains(registration.documentID) {
+            do {
+                let resolvedBookmark = try resolvePresentedFileBookmark(
+                    binding: registration.binding,
+                    bookmarkResolver: bookmarkResolver
+                )
+                let didStartSecurityScope = resolvedBookmark.url
+                    .startAccessingSecurityScopedResource()
+                let presenter = registerPresenter(
+                    documentID: registration.documentID,
+                    url: resolvedBookmark.url
+                )
+                resolvedRegistrations.append(
+                    ResolvedPresentedFileRegistration(
+                        registration: registration,
+                        resolvedURL: resolvedBookmark.url,
+                        didStartSecurityScope: didStartSecurityScope,
+                        presenter: presenter
+                    )
+                )
+            } catch let error as FileAccessConnectorError {
+                outcomes[registration.documentID] = .failed(error)
+            } catch {
+                outcomes[registration.documentID] = .failed(
+                    .unexpectedFileSystemFailure(code: (error as NSError).code)
+                )
+            }
+        }
+
+        for resolvedRegistration in resolvedRegistrations {
+            defer {
+                if resolvedRegistration.didStartSecurityScope {
+                    resolvedRegistration.resolvedURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            do {
+                outcomes[resolvedRegistration.registration.documentID] = .observed(
+                    try observePresentedFile(
+                        binding: resolvedRegistration.registration.binding,
+                        presenter: resolvedRegistration.presenter
+                    )
+                )
+            } catch let error as FileAccessConnectorError {
+                outcomes[resolvedRegistration.registration.documentID] = .failed(error)
+            } catch {
+                outcomes[resolvedRegistration.registration.documentID] = .failed(
+                    .unexpectedFileSystemFailure(code: (error as NSError).code)
+                )
+            }
+        }
+        return outcomes
+    }
+
+    public func reconcilePresentedFile(
+        documentID: DocumentID,
+        binding: FileBinding
+    ) throws -> ObservedBoundFile {
+        guard let presenter = presentedFiles[documentID] else {
+            throw FileAccessConnectorError.filePresenterNotRegistered(
+                documentID: documentID
+            )
+        }
+        presentationHintRelay.acknowledge(documentID: documentID)
+        let resolvedBookmark = try resolvePresentedFileBookmark(
+            binding: binding,
+            bookmarkResolver: bookmarkResolver
+        )
+        let resolvedURL = resolvedBookmark.url
+        let didStartSecurityScope = resolvedURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try observePresentedFile(
+            binding: binding,
+            presenter: presenter
+        )
+    }
+
+    public func readCurrentPresentedTextFile(
+        documentID: DocumentID,
+        binding: FileBinding
+    ) throws -> PresentedTextFileSnapshot {
+        guard let presenter = presentedFiles[documentID] else {
+            throw FileAccessConnectorError.filePresenterNotRegistered(
+                documentID: documentID
+            )
+        }
+        presentationHintRelay.acknowledge(documentID: documentID)
+        let resolvedBookmark = try resolvePresentedFileBookmark(
+            binding: binding,
+            bookmarkResolver: bookmarkResolver
+        )
+        let resolvedURL = resolvedBookmark.url
+        let didStartSecurityScope = resolvedURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let fileManagerReference = FileManagerReference(fileManager: fileManager)
+        let bookmarkCreator = bookmarkCreator
+        let identityReader = identityReader
+        let unresolvedVersionCountReader = unresolvedVersionCountReader
+        let snapshot = try presenter.performSynchronousAccess {
+            let accessURL = presenter.currentPresentedItemURL()
+            let snapshot = try coordinatePresentedTextFileRead(
+                at: accessURL,
+                presenter: presenter,
+                fileManager: fileManagerReference.fileManager,
+                bookmarkCreator: bookmarkCreator,
+                identityReader: identityReader,
+                unresolvedVersionCountReader: unresolvedVersionCountReader
+            )
+            presenter.updatePresentedItemURL(snapshot.openedFile.binding.locatorURL)
+            return snapshot
+        }
+        return snapshot
+    }
+
     public func openTextFile(at selectedURL: URL) throws -> OpenedTextFile {
         let didStartSecurityScope = selectedURL.startAccessingSecurityScopedResource()
         defer {
@@ -824,7 +1102,7 @@ public actor FileAccessConnector {
         let resultBox = OpenFileCoordinationResultBox()
         var coordinationError: NSError?
         let fileCoordinator = NSFileCoordinator(filePresenter: nil)
-        let fileManager = fileManager
+        let fileManagerReference = FileManagerReference(fileManager: fileManager)
         let bookmarkCreator = bookmarkCreator
         let identityReader = identityReader
         fileCoordinator.coordinate(
@@ -834,7 +1112,7 @@ public actor FileAccessConnector {
         ) { coordinatedURL in
             resultBox.result = openCoordinatedTextFile(
                 at: coordinatedURL,
-                fileManager: fileManager,
+                fileManager: fileManagerReference.fileManager,
                 bookmarkCreator: bookmarkCreator,
                 identityReader: identityReader
             )
@@ -851,9 +1129,122 @@ public actor FileAccessConnector {
         throw FileAccessConnectorError.fileCoordinationAccessorNotInvoked
     }
 
+    private func registerPresenter(
+        documentID: DocumentID,
+        url: URL
+    ) -> PresentedFile {
+        removePresenter(documentID: documentID)
+        let presentationHintRelay = presentationHintRelay
+        let presenter = PresentedFile(
+            documentID: documentID,
+            itemURL: url,
+            changeHandler: { changedDocumentID, generation in
+                presentationHintRelay.offer(
+                    documentID: changedDocumentID,
+                    generation: generation
+                )
+            }
+        )
+        presentationHintRelay.activate(
+            documentID: documentID,
+            generation: presenter.generation
+        )
+        presentedFiles[documentID] = presenter
+        NSFileCoordinator.addFilePresenter(presenter)
+        return presenter
+    }
+
+    private func removePresenter(documentID: DocumentID) {
+        guard let presenter = presentedFiles[documentID] else {
+            return
+        }
+        presenter.deactivate()
+        presentationHintRelay.deactivate(
+            documentID: documentID,
+            generation: presenter.generation
+        )
+        NSFileCoordinator.removeFilePresenter(presenter)
+        presentedFiles.removeValue(forKey: documentID)
+    }
+
+    private func observePresentedFile(
+        binding: FileBinding,
+        presenter: PresentedFile
+    ) throws -> ObservedBoundFile {
+        let fileManagerReference = FileManagerReference(fileManager: fileManager)
+        let bookmarkCreator = bookmarkCreator
+        let identityReader = identityReader
+        let unresolvedVersionCountReader = unresolvedVersionCountReader
+        let observation = try presenter.performSynchronousAccess {
+            let accessURL = presenter.currentPresentedItemURL()
+            let observation = try coordinatePresentedFileObservation(
+                at: accessURL,
+                presenter: presenter,
+                baseline: binding,
+                fileManager: fileManagerReference.fileManager,
+                bookmarkCreator: bookmarkCreator,
+                identityReader: identityReader,
+                unresolvedVersionCountReader: unresolvedVersionCountReader
+            )
+            presenter.updatePresentedItemURL(observation.binding.locatorURL)
+            return observation
+        }
+        return observation
+    }
+
     public func saveTextFile(
         binding: FileBinding,
         encodedFile: EncodedTextFile
+    ) throws -> FileSaveOutcome {
+        let coordination = makeLegacyBoundFileCoordination(
+            fileManager: fileManager,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader,
+            replacer: replacer
+        )
+        return try saveTextFile(
+            binding: binding,
+            encodedFile: encodedFile,
+            coordination: coordination
+        )
+    }
+
+    public func saveTextFile(
+        documentID: DocumentID,
+        binding: FileBinding,
+        encodedFile: EncodedTextFile
+    ) throws -> FileSaveOutcome {
+        guard let presenter = presentedFiles[documentID] else {
+            throw FileAccessConnectorError.filePresenterNotRegistered(
+                documentID: documentID
+            )
+        }
+        presentationHintRelay.acknowledge(documentID: documentID)
+        let coordination = makePresentedBoundFileCoordination(
+            presenter: presenter,
+            fileManager: fileManager,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader,
+            replacer: replacer
+        )
+        let outcome = try saveTextFile(
+            binding: binding,
+            encodedFile: encodedFile,
+            coordination: coordination
+        )
+        switch outcome {
+        case .bound:
+            break
+        case .verifiedDetached:
+            removePresenter(documentID: documentID)
+        }
+        return outcome
+    }
+
+    private func saveTextFile(
+        binding: FileBinding,
+        encodedFile: EncodedTextFile,
+        coordination: BoundFileCoordination
     ) throws -> FileSaveOutcome {
         let resolvedBookmark: ResolvedFileBookmark
         do {
@@ -872,14 +1263,16 @@ public actor FileAccessConnector {
             }
         }
 
+        let targetURL = try coordination.targetURL(resolvedURL)
+
         if binding.identity == nil,
-           resolvedURL.standardizedFileURL != binding.locatorURL.standardizedFileURL {
+           targetURL.standardizedFileURL != binding.locatorURL.standardizedFileURL {
             throw FileAccessConnectorError.fileConflict(.ambiguousLocatorChange)
         }
 
         if resolvedBookmark.isStale {
             do {
-                _ = try FileBookmark(data: bookmarkCreator(resolvedURL))
+                _ = try FileBookmark(data: bookmarkCreator(targetURL))
             } catch {
                 throw FileAccessConnectorError.bookmarkRefreshFailed(
                     code: (error as NSError).code
@@ -890,7 +1283,7 @@ public actor FileAccessConnector {
         let stagingLocation: ReplacementStagingLocation
         do {
             stagingLocation = try makeReplacementStagingLocation(
-                for: resolvedURL,
+                for: targetURL,
                 fileManager: fileManager
             )
         } catch {
@@ -954,21 +1347,16 @@ public actor FileAccessConnector {
 
         let operationResult: Result<VerifiedSavedFile, FileAccessConnectorError>
         do {
-            let replacementURL = try coordinatedReplaceBoundFile(
-                binding: binding,
-                resolvedURL: resolvedURL,
-                stagingURL: stagingLocation.fileURL,
-                encodedFile: encodedFile,
-                fileManager: fileManager,
-                identityReader: identityReader,
-                replacer: replacer
+            let replacementURL = try coordination.replace(
+                binding,
+                targetURL,
+                stagingLocation.fileURL,
+                encodedFile
             )
-            let verifiedFile = try coordinatedVerifySavedFile(
-                at: replacementURL,
-                expectedIdentity: binding.identity,
-                encodedFile: encodedFile,
-                fileManager: fileManager,
-                identityReader: identityReader
+            let verifiedFile = try coordination.verify(
+                replacementURL,
+                binding.identity,
+                encodedFile
             )
             operationResult = .success(verifiedFile)
         } catch let error as FileAccessConnectorError {
@@ -1100,6 +1488,14 @@ struct ResolvedFileBookmark: Equatable, Sendable {
     let isStale: Bool
 }
 
+private final class FileManagerReference: @unchecked Sendable {
+    let fileManager: FileManager
+
+    init(fileManager: FileManager) {
+        self.fileManager = fileManager
+    }
+}
+
 private struct ReplacementStagingLocation: Sendable {
     let directoryURL: URL
     let fileURL: URL
@@ -1107,6 +1503,13 @@ private struct ReplacementStagingLocation: Sendable {
 
 private struct ReplacementStagingCleanupError: Error, Sendable {
     let code: Int
+}
+
+private struct ResolvedPresentedFileRegistration: Sendable {
+    let registration: PresentedFileRegistration
+    let resolvedURL: URL
+    let didStartSecurityScope: Bool
+    let presenter: PresentedFile
 }
 
 private struct BoundFileObservation: Sendable {
@@ -1120,6 +1523,21 @@ private struct VerifiedSavedFile: Sendable {
     let identity: FileIdentity?
 }
 
+private struct BoundFileCoordination: Sendable {
+    let targetURL: @Sendable (URL) throws -> URL
+    let replace: @Sendable (
+        FileBinding,
+        URL,
+        URL,
+        EncodedTextFile
+    ) throws -> URL
+    let verify: @Sendable (
+        URL,
+        FileIdentity?,
+        EncodedTextFile
+    ) throws -> VerifiedSavedFile
+}
+
 private enum RegularFileReadFailure: Error, Equatable, Sendable {
     case missing
     case itemIsNotRegularFile(ExistingFileSystemItemKind)
@@ -1129,6 +1547,14 @@ private enum RegularFileReadFailure: Error, Equatable, Sendable {
 
 private final class OpenFileCoordinationResultBox: @unchecked Sendable {
     var result: Result<OpenedTextFile, FileAccessConnectorError>?
+}
+
+private final class PresentedOpenCoordinationResultBox: @unchecked Sendable {
+    var result: Result<PresentedTextFileSnapshot, FileAccessConnectorError>?
+}
+
+private final class PresentedFileObservationResultBox: @unchecked Sendable {
+    var result: Result<ObservedBoundFile, FileAccessConnectorError>?
 }
 
 private final class BoundFileReplacementResultBox: @unchecked Sendable {
@@ -1335,6 +1761,222 @@ private func openCoordinatedTextFile(
             .unexpectedFileSystemFailure(code: (error as NSError).code)
         )
     }
+}
+
+private func openPresentedCoordinatedTextFile(
+    at url: URL,
+    fileManager: FileManager,
+    bookmarkCreator: FileAccessConnector.BookmarkCreator,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader
+) -> Result<PresentedTextFileSnapshot, FileAccessConnectorError> {
+    openCoordinatedTextFile(
+        at: url,
+        fileManager: fileManager,
+        bookmarkCreator: bookmarkCreator,
+        identityReader: identityReader
+    )
+    .flatMap { openedFile in
+        do {
+            return .success(
+                PresentedTextFileSnapshot(
+                    openedFile: openedFile,
+                    providerConflictVersions: try makeProviderConflictVersions(
+                        unresolvedCount: unresolvedVersionCountReader(url)
+                    )
+                )
+            )
+        } catch let error as FileAccessConnectorError {
+            return .failure(error)
+        } catch {
+            return .failure(
+                .unexpectedFileSystemFailure(code: (error as NSError).code)
+            )
+        }
+    }
+}
+
+private func coordinatePresentedTextFileRead(
+    at url: URL,
+    presenter: PresentedFile,
+    fileManager: FileManager,
+    bookmarkCreator: FileAccessConnector.BookmarkCreator,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader
+) throws -> PresentedTextFileSnapshot {
+    let resultBox = PresentedOpenCoordinationResultBox()
+    var coordinationError: NSError?
+    let fileCoordinator = NSFileCoordinator(filePresenter: presenter)
+    fileCoordinator.coordinate(
+        readingItemAt: url,
+        options: .withoutChanges,
+        error: &coordinationError
+    ) { coordinatedURL in
+        resultBox.result = openPresentedCoordinatedTextFile(
+            at: coordinatedURL,
+            fileManager: fileManager,
+            bookmarkCreator: bookmarkCreator,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader
+        )
+    }
+    if let result = resultBox.result {
+        return try result.get()
+    }
+    if let coordinationError {
+        throw FileAccessConnectorError.fileCoordinationFailed(
+            code: coordinationError.code
+        )
+    }
+    throw FileAccessConnectorError.fileCoordinationAccessorNotInvoked
+}
+
+private func coordinatePresentedFileObservation(
+    at url: URL,
+    presenter: PresentedFile,
+    baseline: FileBinding,
+    fileManager: FileManager,
+    bookmarkCreator: FileAccessConnector.BookmarkCreator,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader
+) throws -> ObservedBoundFile {
+    let resultBox = PresentedFileObservationResultBox()
+    var coordinationError: NSError?
+    let fileCoordinator = NSFileCoordinator(filePresenter: presenter)
+    fileCoordinator.coordinate(
+        readingItemAt: url,
+        options: .withoutChanges,
+        error: &coordinationError
+    ) { coordinatedURL in
+        resultBox.result = observeCoordinatedPresentedFile(
+            at: coordinatedURL,
+            baseline: baseline,
+            fileManager: fileManager,
+            bookmarkCreator: bookmarkCreator,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader
+        )
+    }
+    if let result = resultBox.result {
+        return try result.get()
+    }
+    if let coordinationError {
+        throw FileAccessConnectorError.fileCoordinationFailed(
+            code: coordinationError.code
+        )
+    }
+    throw FileAccessConnectorError.fileCoordinationAccessorNotInvoked
+}
+
+private func observeCoordinatedPresentedFile(
+    at url: URL,
+    baseline: FileBinding,
+    fileManager: FileManager,
+    bookmarkCreator: FileAccessConnector.BookmarkCreator,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader
+) -> Result<ObservedBoundFile, FileAccessConnectorError> {
+    do {
+        switch try inspectNode(at: url, fileManager: fileManager) {
+        case .missing:
+            throw FileAccessConnectorError.boundFileMissing
+        case .directory:
+            throw FileAccessConnectorError.boundFileIsNotRegularFile(.directory)
+        case .existing(.regularFile):
+            break
+        case let .existing(kind):
+            throw FileAccessConnectorError.boundFileIsNotRegularFile(kind)
+        }
+        let snapshot = try readPresentedFileSnapshot(
+            at: url,
+            fileManager: fileManager,
+            identityReader: identityReader
+        )
+        let bookmark: FileBookmark
+        do {
+            bookmark = try FileBookmark(data: bookmarkCreator(url))
+        } catch {
+            throw FileAccessConnectorError.bookmarkRefreshFailed(
+                code: (error as NSError).code
+            )
+        }
+        let observedBinding = FileBinding(
+            locatorURL: url,
+            bookmark: bookmark,
+            identity: snapshot.identity,
+            displayName: baseline.displayName,
+            digest: snapshot.digest,
+            encoding: baseline.encoding,
+            lineEnding: baseline.lineEnding
+        )
+        return .success(
+            ObservedBoundFile(
+                binding: observedBinding,
+                providerConflictVersions: try makeProviderConflictVersions(
+                    unresolvedCount: unresolvedVersionCountReader(url)
+                )
+            )
+        )
+    } catch let error as FileAccessConnectorError {
+        return .failure(error)
+    } catch {
+        return .failure(
+            .unexpectedFileSystemFailure(code: (error as NSError).code)
+        )
+    }
+}
+
+private func readPresentedFileSnapshot(
+    at url: URL,
+    fileManager: FileManager,
+    identityReader: FileAccessConnector.FileIdentityReader
+) throws -> SaveAsTargetSnapshot {
+    do {
+        return try readSaveAsTargetSnapshot(
+            at: url,
+            fileManager: fileManager,
+            identityReader: identityReader
+        )
+    } catch let error as FileAccessConnectorError {
+        switch error {
+        case .saveAsTargetChanged:
+            throw FileAccessConnectorError.boundFileMissing
+        case let .saveAsTargetSnapshotReadFailed(code):
+            throw FileAccessConnectorError.inputReadFailed(code: code)
+        case let .targetAlreadyExists(kind):
+            throw FileAccessConnectorError.boundFileIsNotRegularFile(kind)
+        default:
+            throw error
+        }
+    }
+}
+
+private func resolvePresentedFileBookmark(
+    binding: FileBinding,
+    bookmarkResolver: FileAccessConnector.BookmarkResolver
+) throws -> ResolvedFileBookmark {
+    do {
+        return try bookmarkResolver(binding.bookmark)
+    } catch let error as FileAccessConnectorError {
+        throw error
+    } catch {
+        throw FileAccessConnectorError.bookmarkResolutionFailed(
+            code: (error as NSError).code
+        )
+    }
+}
+
+private func duplicatedPresentedDocumentIDs(
+    registrations: [PresentedFileRegistration]
+) -> Set<DocumentID> {
+    var seenDocumentIDs: Set<DocumentID> = []
+    var duplicateDocumentIDs: Set<DocumentID> = []
+    for registration in registrations {
+        if !seenDocumentIDs.insert(registration.documentID).inserted {
+            duplicateDocumentIDs.insert(registration.documentID)
+        }
+    }
+    return duplicateDocumentIDs
 }
 
 private struct SelectedFileMetadata {
@@ -2801,10 +3443,10 @@ private func matchingSaveAsCollisionClaims(
     var matches: [FileCollisionClaim] = []
     for claim in claims {
         if let reference = claim.fileReference {
-            if let targetIdentity, let claimedIdentity = reference.identity {
-                if targetIdentity == claimedIdentity {
-                    matches.append(claim)
-                }
+            if let targetIdentity,
+               let claimedIdentity = reference.identity,
+               targetIdentity == claimedIdentity {
+                matches.append(claim)
                 continue
             }
             let resolvedURL = try resolveCollisionClaimURL(
@@ -3014,6 +3656,93 @@ private func removeReplacementStagingLocation(
     }
 }
 
+private func makeLegacyBoundFileCoordination(
+    fileManager: FileManager,
+    identityReader: @escaping FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: @escaping FileAccessConnector.UnresolvedVersionCountReader,
+    replacer: @escaping FileAccessConnector.FileReplacer
+) -> BoundFileCoordination {
+    let fileManagerReference = FileManagerReference(fileManager: fileManager)
+    return BoundFileCoordination(
+        targetURL: { resolvedURL in resolvedURL },
+        replace: { binding, resolvedURL, stagingURL, encodedFile in
+            try coordinatedReplaceBoundFile(
+                binding: binding,
+                resolvedURL: resolvedURL,
+                stagingURL: stagingURL,
+                encodedFile: encodedFile,
+                fileManager: fileManagerReference.fileManager,
+                identityReader: identityReader,
+                unresolvedVersionCountReader: unresolvedVersionCountReader,
+                filePresenter: nil,
+                replacer: replacer
+            )
+        },
+        verify: { url, expectedIdentity, encodedFile in
+            try coordinatedVerifySavedFile(
+                at: url,
+                expectedIdentity: expectedIdentity,
+                encodedFile: encodedFile,
+                fileManager: fileManagerReference.fileManager,
+                identityReader: identityReader,
+                unresolvedVersionCountReader: unresolvedVersionCountReader,
+                filePresenter: nil
+            )
+        }
+    )
+}
+
+private func makePresentedBoundFileCoordination(
+    presenter: PresentedFile,
+    fileManager: FileManager,
+    identityReader: @escaping FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: @escaping FileAccessConnector.UnresolvedVersionCountReader,
+    replacer: @escaping FileAccessConnector.FileReplacer
+) -> BoundFileCoordination {
+    let fileManagerReference = FileManagerReference(fileManager: fileManager)
+    return BoundFileCoordination(
+        targetURL: { _ in
+            try presenter.performSynchronousAccess {
+                presenter.currentPresentedItemURL()
+            }
+        },
+        replace: { binding, _, stagingURL, encodedFile in
+            try presenter.performSynchronousAccess {
+                let accessURL = presenter.currentPresentedItemURL()
+                let replacementURL = try coordinatedReplaceBoundFile(
+                    binding: binding,
+                    resolvedURL: accessURL,
+                    stagingURL: stagingURL,
+                    encodedFile: encodedFile,
+                    fileManager: fileManagerReference.fileManager,
+                    identityReader: identityReader,
+                    unresolvedVersionCountReader: unresolvedVersionCountReader,
+                    filePresenter: presenter,
+                    replacer: replacer
+                )
+                presenter.updatePresentedItemURL(replacementURL)
+                return replacementURL
+            }
+        },
+        verify: { _, expectedIdentity, encodedFile in
+            try presenter.performSynchronousAccess {
+                let accessURL = presenter.currentPresentedItemURL()
+                let verifiedFile = try coordinatedVerifySavedFile(
+                    at: accessURL,
+                    expectedIdentity: expectedIdentity,
+                    encodedFile: encodedFile,
+                    fileManager: fileManagerReference.fileManager,
+                    identityReader: identityReader,
+                    unresolvedVersionCountReader: unresolvedVersionCountReader,
+                    filePresenter: presenter
+                )
+                presenter.updatePresentedItemURL(verifiedFile.url)
+                return verifiedFile
+            }
+        }
+    )
+}
+
 private func coordinatedReplaceBoundFile(
     binding: FileBinding,
     resolvedURL: URL,
@@ -3021,11 +3750,13 @@ private func coordinatedReplaceBoundFile(
     encodedFile: EncodedTextFile,
     fileManager: FileManager,
     identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader,
+    filePresenter: NSFilePresenter?,
     replacer: FileAccessConnector.FileReplacer
 ) throws -> URL {
     let resultBox = BoundFileReplacementResultBox()
     var coordinationError: NSError?
-    let fileCoordinator = NSFileCoordinator(filePresenter: nil)
+    let fileCoordinator = NSFileCoordinator(filePresenter: filePresenter)
     fileCoordinator.coordinate(
         writingItemAt: resolvedURL,
         options: [],
@@ -3033,12 +3764,12 @@ private func coordinatedReplaceBoundFile(
     ) { coordinatedURL in
         resultBox.result = replaceCoordinatedBoundFile(
             binding: binding,
-            resolvedURL: resolvedURL,
             coordinatedURL: coordinatedURL,
             stagingURL: stagingURL,
             encodedFile: encodedFile,
             fileManager: fileManager,
             identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader,
             replacer: replacer
         )
     }
@@ -3056,25 +3787,28 @@ private func coordinatedReplaceBoundFile(
 
 private func replaceCoordinatedBoundFile(
     binding: FileBinding,
-    resolvedURL: URL,
     coordinatedURL: URL,
     stagingURL: URL,
     encodedFile: EncodedTextFile,
     fileManager: FileManager,
     identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader,
     replacer: FileAccessConnector.FileReplacer
 ) -> Result<URL, FileAccessConnectorError> {
     do {
         if binding.identity == nil,
-           coordinatedURL.standardizedFileURL != resolvedURL.standardizedFileURL {
+           coordinatedURL.standardizedFileURL != binding.locatorURL.standardizedFileURL {
             throw FileAccessConnectorError.fileConflict(.ambiguousLocatorChange)
         }
-        let unresolvedVersions = NSFileVersion.unresolvedConflictVersionsOfItem(
-            at: coordinatedURL
-        ) ?? []
-        guard unresolvedVersions.isEmpty else {
+        let unresolvedVersionCount = unresolvedVersionCountReader(coordinatedURL)
+        guard unresolvedVersionCount >= 0 else {
+            throw FileAccessConnectorError.providerConflictVersionCountInvalid(
+                count: unresolvedVersionCount
+            )
+        }
+        guard unresolvedVersionCount == 0 else {
             throw FileAccessConnectorError.fileConflict(
-                .unresolvedProviderVersions(count: unresolvedVersions.count)
+                .unresolvedProviderVersions(count: unresolvedVersionCount)
             )
         }
         let originalObservation = try readBoundFileObservation(
@@ -3142,11 +3876,13 @@ private func coordinatedVerifySavedFile(
     expectedIdentity: FileIdentity?,
     encodedFile: EncodedTextFile,
     fileManager: FileManager,
-    identityReader: FileAccessConnector.FileIdentityReader
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader,
+    filePresenter: NSFilePresenter?
 ) throws -> VerifiedSavedFile {
     let resultBox = SavedFileVerificationResultBox()
     var coordinationError: NSError?
-    let fileCoordinator = NSFileCoordinator(filePresenter: nil)
+    let fileCoordinator = NSFileCoordinator(filePresenter: filePresenter)
     fileCoordinator.coordinate(
         readingItemAt: url,
         options: .withoutChanges,
@@ -3157,7 +3893,8 @@ private func coordinatedVerifySavedFile(
             expectedIdentity: expectedIdentity,
             encodedFile: encodedFile,
             fileManager: fileManager,
-            identityReader: identityReader
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader
         )
     }
 
@@ -3175,13 +3912,17 @@ private func verifyCoordinatedSavedFile(
     expectedIdentity: FileIdentity?,
     encodedFile: EncodedTextFile,
     fileManager: FileManager,
-    identityReader: FileAccessConnector.FileIdentityReader
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader
 ) -> Result<VerifiedSavedFile, FileAccessConnectorError> {
     do {
-        let unresolvedVersions = NSFileVersion.unresolvedConflictVersionsOfItem(
-            at: url
-        ) ?? []
-        guard unresolvedVersions.isEmpty else {
+        let unresolvedVersionCount = unresolvedVersionCountReader(url)
+        guard unresolvedVersionCount >= 0 else {
+            return .failure(
+                .providerConflictVersionCountInvalid(count: unresolvedVersionCount)
+            )
+        }
+        guard unresolvedVersionCount == 0 else {
             return .failure(.postWriteOutcomeIndeterminate)
         }
         let observation = try readBoundFileObservation(
@@ -3600,4 +4341,41 @@ func removeStagingIfPresent(
             after: precedingError
         )
     }
+}
+
+private struct PresentationChangeStream: Sendable {
+    let stream: AsyncStream<DocumentID>
+    let relay: PresentationHintRelay
+}
+
+private let maximumBufferedPresentationChangeHintCount: Int = 64
+
+private func makePresentationChangeStream() -> PresentationChangeStream {
+    let pair = AsyncStream<DocumentID>.makeStream(
+        bufferingPolicy: .bufferingNewest(
+            maximumBufferedPresentationChangeHintCount
+        )
+    )
+    return PresentationChangeStream(
+        stream: pair.stream,
+        relay: PresentationHintRelay(continuation: pair.continuation)
+    )
+}
+
+private func readUnresolvedVersionCount(url: URL) -> Int {
+    NSFileVersion.unresolvedConflictVersionsOfItem(at: url)?.count ?? 0
+}
+
+private func makeProviderConflictVersions(
+    unresolvedCount: Int
+) throws -> FileProviderConflictVersions {
+    guard unresolvedCount >= 0 else {
+        throw FileAccessConnectorError.providerConflictVersionCountInvalid(
+            count: unresolvedCount
+        )
+    }
+    guard unresolvedCount > 0 else {
+        return .none
+    }
+    return .unresolved(count: unresolvedCount)
 }

@@ -91,6 +91,10 @@ public enum SaveAsWorkflowError: Error, Equatable, Sendable {
     case targetIsCurrentFile
     case targetIsNotCurrentFile
     case currentFileRequiresBinding(DocumentID)
+    case currentFileHasConflict(
+        documentID: DocumentID,
+        conflict: FileConflict
+    )
     case activeDocumentRecoveryNotProtected(
         documentID: DocumentID,
         actualState: DocumentRecoveryState
@@ -124,6 +128,8 @@ extension SaveAsWorkflowError: LocalizedError {
             return "This Save As target is not the Document's current File. Choose Save As again."
         case let .currentFileRequiresBinding(documentID):
             return "Document \(documentID.rawValue) has no current File binding. Choose a different Save As target."
+        case let .currentFileHasConflict(documentID, _):
+            return "Document \(documentID.rawValue) has a File Conflict. Reload Current or choose a different Save As target; the original File was not changed."
         case let .activeDocumentRecoveryNotProtected(documentID, actualState):
             return "Document \(documentID.rawValue) recovery is \(actualState.rawValue), not protected. Retry recovery before creating a File."
         case let .outputVerifiedButRecoveryCleanupFailed(_, cleanupFailure):
@@ -176,6 +182,11 @@ public func preflightPreparedSaveAs<RecoveryStore: RecoveryStoring>(
         fileName: preparedSave.fileName,
         currentDocumentID: preparedSave.documentID,
         collisionClaims: activeClaims + recoveryClaims
+    )
+    try requirePreparedSaveAsTargetAllowed(
+        state: state,
+        documentID: preparedSave.documentID,
+        target: target
     )
     return PreparedSaveAsPreflight(preparedSave: preparedSave, target: target)
 }
@@ -268,6 +279,17 @@ public func protectPreparedSaveAs<RecoveryStore: RecoveryStoring>(
 ) async throws -> PhonePadState {
     let preparedSave = preflight.preparedSave
     try validatePreparedSaveAs(state: state, preparedSave: preparedSave)
+    try requirePreparedSaveAsTargetAllowed(
+        state: state,
+        documentID: preparedSave.documentID,
+        target: preflight.target
+    )
+    if case .currentFile = preflight.target {
+        _ = try requireCurrentFileSaveAsAllowed(
+            state: state,
+            documentID: preparedSave.documentID
+        )
+    }
     guard preparedSave.sourceWasUnsaved else {
         return state
     }
@@ -275,11 +297,6 @@ public func protectPreparedSaveAs<RecoveryStore: RecoveryStoring>(
     let pendingDestination: RecoveryPendingSaveDestination
     switch preflight.target {
     case .currentFile:
-        guard preparedSave.sourceBinding != nil else {
-            throw SaveAsWorkflowError.currentFileRequiresBinding(
-                preparedSave.documentID
-            )
-        }
         pendingDestination = .boundFile
     case .ready, .replacementRequired:
         pendingDestination = .saveAs(
@@ -374,6 +391,11 @@ public func saveConfirmedReplacementProtectedSaveAs<RecoveryStore: RecoveryStori
 ) async throws -> SaveAsResult {
     let preparedSave = preflight.preparedSave
     try validatePreparedSaveAs(state: state, preparedSave: preparedSave)
+    try requirePreparedSaveAsTargetAllowed(
+        state: state,
+        documentID: preparedSave.documentID,
+        target: preflight.target
+    )
     if preparedSave.sourceWasUnsaved {
         let recoveryState = state.activeTab.document.recoveryState
         guard recoveryState == .protectedUnsaved else {
@@ -412,6 +434,9 @@ public func saveCurrentFileProtectedSaveAs<RecoveryStore: RecoveryStoring>(
 ) async throws -> SaveAsResult {
     let preparedSave = preflight.preparedSave
     try validatePreparedSaveAs(state: state, preparedSave: preparedSave)
+    guard case .currentFile = preflight.target else {
+        throw SaveAsWorkflowError.targetIsNotCurrentFile
+    }
     if preparedSave.sourceWasUnsaved {
         let recoveryState = state.activeTab.document.recoveryState
         guard recoveryState == .protectedUnsaved else {
@@ -421,23 +446,64 @@ public func saveCurrentFileProtectedSaveAs<RecoveryStore: RecoveryStoring>(
             )
         }
     }
-    guard case .currentFile = preflight.target else {
-        throw SaveAsWorkflowError.targetIsNotCurrentFile
-    }
-    guard let sourceBinding = preparedSave.sourceBinding else {
-        throw SaveAsWorkflowError.currentFileRequiresBinding(
-            preparedSave.documentID
-        )
-    }
+    let sourceBinding = try requireCurrentFileSaveAsAllowed(
+        state: state,
+        documentID: preparedSave.documentID
+    )
     let saveOutcome = try await fileAccessConnector.saveTextFile(
+        documentID: preparedSave.documentID,
         binding: sourceBinding,
         encodedFile: preparedSave.encodedFile
     )
-    return try await finishVerifiedSaveAs(
+    let result = try makeCurrentFileSaveAsResult(
         state: state,
         preparedSave: preparedSave,
-        commitOutcome: .complete(saveOutcome),
+        saveOutcome: saveOutcome
+    )
+    return try await finishVerifiedSaveAsResult(
+        result: result,
+        preparedSave: preparedSave,
         recoveryStore: recoveryStore
+    )
+}
+
+private func requireCurrentFileSaveAsAllowed(
+    state: PhonePadState,
+    documentID: DocumentID
+) throws -> FileBinding {
+    do {
+        return try requireBoundFileSaveAllowed(
+            state: state,
+            documentID: documentID
+        )
+    } catch let error as SavedDocumentTransitionError {
+        guard case let .fileConflictRequiresExplicitResolution(conflict) = error else {
+            throw error
+        }
+        throw SaveAsWorkflowError.currentFileHasConflict(
+            documentID: documentID,
+            conflict: conflict
+        )
+    } catch let error as PhonePadStateError {
+        guard case .documentIsNotBound = error else {
+            throw error
+        }
+        throw SaveAsWorkflowError.currentFileRequiresBinding(documentID)
+    }
+}
+
+private func requirePreparedSaveAsTargetAllowed(
+    state: PhonePadState,
+    documentID: DocumentID,
+    target: SaveAsTargetPreflight
+) throws {
+    guard case .replacementRequired = target,
+          state.activeTab.document.fileConflict == .stableIdentityChanged else {
+        return
+    }
+    throw SaveAsWorkflowError.currentFileHasConflict(
+        documentID: documentID,
+        conflict: .stableIdentityChanged
     )
 }
 
@@ -452,6 +518,18 @@ private func finishVerifiedSaveAs<RecoveryStore: RecoveryStoring>(
         preparedSave: preparedSave,
         commitOutcome: commitOutcome
     )
+    return try await finishVerifiedSaveAsResult(
+        result: result,
+        preparedSave: preparedSave,
+        recoveryStore: recoveryStore
+    )
+}
+
+private func finishVerifiedSaveAsResult<RecoveryStore: RecoveryStoring>(
+    result: SaveAsResult,
+    preparedSave: PreparedSaveAs,
+    recoveryStore: RecoveryStore
+) async throws -> SaveAsResult {
     guard preparedSave.sourceWasUnsaved else {
         return result
     }
@@ -489,7 +567,7 @@ private func makeSaveAsResult(
     switch saveOutcome {
     case let .bound(binding):
         return SaveAsResult(
-            state: try markActiveDocumentSavedToBoundFile(
+            state: try markActiveDocumentSavedAsBoundFile(
                 state: state,
                 encodedFile: preparedSave.encodedFile,
                 fileBinding: binding
@@ -513,6 +591,39 @@ private func makeSaveAsResult(
                 durableFileAccessUnavailable: true,
                 recoveryCleanupPending: false,
                 stagingCleanupFailureCode: stagingCleanupFailureCode
+            )
+        )
+    }
+}
+
+private func makeCurrentFileSaveAsResult(
+    state: PhonePadState,
+    preparedSave: PreparedSaveAs,
+    saveOutcome: FileSaveOutcome
+) throws -> SaveAsResult {
+    switch saveOutcome {
+    case let .bound(binding):
+        return SaveAsResult(
+            state: try markActiveDocumentSavedToBoundFile(
+                state: state,
+                encodedFile: preparedSave.encodedFile,
+                fileBinding: binding
+            ),
+            disposition: .bound,
+            notice: nil
+        )
+    case let .verifiedDetached(detachedFile):
+        return SaveAsResult(
+            state: try markActiveDocumentSavedToDetachedFile(
+                state: state,
+                encodedFile: preparedSave.encodedFile,
+                fileName: detachedFile.displayName
+            ),
+            disposition: .verifiedDetached,
+            notice: makeSaveAsNotice(
+                durableFileAccessUnavailable: true,
+                recoveryCleanupPending: false,
+                stagingCleanupFailureCode: nil
             )
         )
     }

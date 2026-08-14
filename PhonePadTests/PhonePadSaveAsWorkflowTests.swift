@@ -438,16 +438,23 @@ final class PhonePadSaveAsWorkflowTests: XCTestCase {
             to: sourceURL,
             options: .withoutOverwriting
         )
-        let openedSource = try await connector.openTextFile(at: sourceURL)
-        let openedState = openBoundDocument(
+        let documentID = DocumentID(rawValue: UUID())
+        let openedSnapshot = try await connector.openTextFile(
+            at: sourceURL,
+            documentID: documentID
+        )
+        let openedState = openObservedBoundDocument(
             state: makeInitialPhonePadState(
                 documentID: DocumentID(rawValue: UUID()),
                 tabID: TabID(rawValue: UUID())
             ),
-            documentID: DocumentID(rawValue: UUID()),
+            documentID: documentID,
             tabID: TabID(rawValue: UUID()),
-            text: openedSource.text,
-            fileBinding: openedSource.binding
+            text: openedSnapshot.openedFile.text,
+            observation: ObservedBoundFile(
+                binding: openedSnapshot.openedFile.binding,
+                providerConflictVersions: openedSnapshot.providerConflictVersions
+            )
         )
         let editedState = try await editActiveDocumentAndCheckpoint(
             state: openedState,
@@ -506,6 +513,354 @@ final class PhonePadSaveAsWorkflowTests: XCTestCase {
         XCTAssertNil(remainingRecovery)
     }
 
+    func testStableIdentityConflictCannotReplaceSameBoundLocatorThroughSaveAs() async throws {
+        let fixture = try makeSaveAsFixture()
+        let targetURL = fixture.filesURL.appendingPathComponent(
+            "Current.txt",
+            isDirectory: false
+        )
+        let externalBytes = Data("External replacement\n".utf8)
+        try externalBytes.write(to: targetURL, options: .withoutOverwriting)
+        let volumeUUID = UUID(
+            uuidString: "70000000-0000-0000-0000-000000000010"
+        )!
+        let baselineIdentity = FileIdentity(
+            volumeUUID: volumeUUID,
+            documentIdentifier: 70
+        )
+        let externalIdentity = FileIdentity(
+            volumeUUID: volumeUUID,
+            documentIdentifier: 71
+        )
+        let connector = makeStableIdentityConflictConnector(
+            boundURL: targetURL,
+            externalIdentity: externalIdentity
+        )
+        let baselineFile = try encodeNewTextFile(text: "Opened baseline\n")
+        let documentID = DocumentID(rawValue: UUID())
+        let binding = FileBinding(
+            locatorURL: targetURL,
+            bookmark: try FileBookmark(
+                data: targetURL.bookmarkData(
+                    options: [],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+            ),
+            identity: baselineIdentity,
+            displayName: try ValidatedFileName(validating: "Current.txt"),
+            digest: baselineFile.digest,
+            encoding: baselineFile.encoding,
+            lineEnding: baselineFile.lineEnding
+        )
+        let openedState = openBoundDocument(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID()),
+            text: baselineFile.text,
+            fileBinding: binding
+        )
+        let editedState = try await editActiveDocumentAndCheckpoint(
+            state: openedState,
+            newText: "Local edit\n",
+            editedAt: Date(timeIntervalSince1970: 1_786_801_200),
+            recoveryStore: fixture.recoveryStore
+        )
+        let conflictedState = try markDocumentFileConflict(
+            state: editedState,
+            documentID: documentID,
+            conflict: .stableIdentityChanged
+        )
+        let preparation = try prepareSaveAs(
+            state: conflictedState,
+            fileName: "Current.txt",
+            encoding: .utf8,
+            recoveryEditedAt: Date(timeIntervalSince1970: 1_786_801_300)
+        )
+        let stateBeforeAttempt = conflictedState
+        var stateAfterAttempt = conflictedState
+        let loadedRecoveryBeforeAttempt = try await fixture.recoveryStore.load(
+            documentID: documentID
+        )
+        let recoveryBeforeAttempt = try XCTUnwrap(loadedRecoveryBeforeAttempt)
+        let preflight = try await preflightPreparedSaveAs(
+            state: conflictedState,
+            preparedSave: preparation,
+            selectedDirectoryURL: fixture.filesURL,
+            fileAccessConnector: connector,
+            recoveryStore: fixture.recoveryStore
+        )
+
+        guard case .currentFile = preflight.target else {
+            if case .replacementRequired = preflight.target {
+                do {
+                    let result = try await saveConfirmedReplacementPreparedSaveAs(
+                        state: conflictedState,
+                        preflight: preflight,
+                        fileAccessConnector: connector,
+                        recoveryStore: fixture.recoveryStore
+                    )
+                    stateAfterAttempt = result.state
+                    XCTFail("Conflicted current locator entered confirmed replacement write.")
+                } catch {
+                    XCTFail("Conflicted current locator entered replacement flow: \(error)")
+                }
+            }
+            let recoveryAfterAttempt = try await fixture.recoveryStore.load(
+                documentID: documentID
+            )
+            XCTAssertEqual(stateAfterAttempt, stateBeforeAttempt)
+            XCTAssertEqual(recoveryAfterAttempt, recoveryBeforeAttempt)
+            XCTAssertEqual(try Data(contentsOf: targetURL), externalBytes)
+            return XCTFail("Conflicted current locator must route through current-File safety.")
+        }
+
+        do {
+            _ = try await saveCurrentFilePreparedSaveAs(
+                state: conflictedState,
+                preflight: preflight,
+                fileAccessConnector: connector,
+                recoveryStore: fixture.recoveryStore
+            )
+            XCTFail("Stable-identity conflict must block current-File Save As.")
+        } catch let error as SaveAsWorkflowError {
+            XCTAssertEqual(
+                error,
+                .currentFileHasConflict(
+                    documentID: documentID,
+                    conflict: .stableIdentityChanged
+                )
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let recoveryAfterAttempt = try await fixture.recoveryStore.load(
+            documentID: documentID
+        )
+        XCTAssertEqual(stateAfterAttempt, stateBeforeAttempt)
+        XCTAssertEqual(recoveryAfterAttempt, recoveryBeforeAttempt)
+        XCTAssertEqual(try Data(contentsOf: targetURL), externalBytes)
+    }
+
+    func testStableIdentityConflictCannotReplaceExistingTargetAtUnknownMovedLocator() async throws {
+        let fixture = try makeSaveAsFixture()
+        let retainedBoundURL = fixture.filesURL.appendingPathComponent(
+            "Original.txt",
+            isDirectory: false
+        )
+        let movedTargetURL = fixture.filesURL.appendingPathComponent(
+            "Moved.txt",
+            isDirectory: false
+        )
+        let externalBytes = Data("Moved external replacement\n".utf8)
+        try externalBytes.write(
+            to: movedTargetURL,
+            options: .withoutOverwriting
+        )
+        let volumeUUID = UUID(
+            uuidString: "70000000-0000-0000-0000-000000000011"
+        )!
+        let baselineIdentity = FileIdentity(
+            volumeUUID: volumeUUID,
+            documentIdentifier: 80
+        )
+        let externalIdentity = FileIdentity(
+            volumeUUID: volumeUUID,
+            documentIdentifier: 81
+        )
+        let connector = makeStableIdentityConflictConnector(
+            boundURL: retainedBoundURL,
+            externalIdentity: externalIdentity
+        )
+        let baselineFile = try encodeNewTextFile(text: "Opened before move\n")
+        let documentID = DocumentID(rawValue: UUID())
+        let binding = FileBinding(
+            locatorURL: retainedBoundURL,
+            bookmark: try FileBookmark(data: Data([0x01])),
+            identity: baselineIdentity,
+            displayName: try ValidatedFileName(validating: "Original.txt"),
+            digest: baselineFile.digest,
+            encoding: baselineFile.encoding,
+            lineEnding: baselineFile.lineEnding
+        )
+        let openedState = openBoundDocument(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID()),
+            text: baselineFile.text,
+            fileBinding: binding
+        )
+        let editedState = try await editActiveDocumentAndCheckpoint(
+            state: openedState,
+            newText: "Local edit after move\n",
+            editedAt: Date(timeIntervalSince1970: 1_786_801_400),
+            recoveryStore: fixture.recoveryStore
+        )
+        let conflictedState = try markDocumentFileConflict(
+            state: editedState,
+            documentID: documentID,
+            conflict: .stableIdentityChanged
+        )
+        let preparation = try prepareSaveAs(
+            state: conflictedState,
+            fileName: "Moved.txt",
+            encoding: .utf8,
+            recoveryEditedAt: Date(timeIntervalSince1970: 1_786_801_500)
+        )
+        let stateBeforeAttempt = conflictedState
+        var stateAfterAttempt = conflictedState
+        let loadedRecoveryBeforeAttempt = try await fixture.recoveryStore.load(
+            documentID: documentID
+        )
+        let recoveryBeforeAttempt = try XCTUnwrap(loadedRecoveryBeforeAttempt)
+
+        do {
+            let preflight = try await preflightPreparedSaveAs(
+                state: conflictedState,
+                preparedSave: preparation,
+                selectedDirectoryURL: fixture.filesURL,
+                fileAccessConnector: connector,
+                recoveryStore: fixture.recoveryStore
+            )
+            guard case .replacementRequired = preflight.target else {
+                return XCTFail("Existing moved target unexpectedly bypassed replacement preflight.")
+            }
+            let result = try await saveConfirmedReplacementPreparedSaveAs(
+                state: conflictedState,
+                preflight: preflight,
+                fileAccessConnector: connector,
+                recoveryStore: fixture.recoveryStore
+            )
+            stateAfterAttempt = result.state
+            XCTFail("Stable-identity conflict entered confirmed replacement write.")
+        } catch let error as SaveAsWorkflowError {
+            XCTAssertEqual(
+                error,
+                .currentFileHasConflict(
+                    documentID: documentID,
+                    conflict: .stableIdentityChanged
+                )
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let recoveryAfterAttempt = try await fixture.recoveryStore.load(
+            documentID: documentID
+        )
+        XCTAssertEqual(stateAfterAttempt, stateBeforeAttempt)
+        XCTAssertEqual(recoveryAfterAttempt, recoveryBeforeAttempt)
+        XCTAssertEqual(try Data(contentsOf: movedTargetURL), externalBytes)
+    }
+
+    func testStableIdentityConflictBlocksStoredReplacementPreflightBeforeWrite() async throws {
+        let fixture = try makeSaveAsFixture()
+        let sourceURL = fixture.filesURL.appendingPathComponent(
+            "Source.txt",
+            isDirectory: false
+        )
+        try Data("Opened source\n".utf8).write(
+            to: sourceURL,
+            options: .withoutOverwriting
+        )
+        let targetURL = fixture.filesURL.appendingPathComponent(
+            "Existing.txt",
+            isDirectory: false
+        )
+        let externalBytes = Data("Existing external target\n".utf8)
+        try externalBytes.write(to: targetURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+        let documentID = DocumentID(rawValue: UUID())
+        let openedSnapshot = try await connector.openTextFile(
+            at: sourceURL,
+            documentID: documentID
+        )
+        addTeardownBlock {
+            await connector.stopPresenting(documentID: documentID)
+        }
+        let openedState = openObservedBoundDocument(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            documentID: documentID,
+            tabID: TabID(rawValue: UUID()),
+            text: openedSnapshot.openedFile.text,
+            observation: ObservedBoundFile(
+                binding: openedSnapshot.openedFile.binding,
+                providerConflictVersions: openedSnapshot.providerConflictVersions
+            )
+        )
+        let editedState = try await editActiveDocumentAndCheckpoint(
+            state: openedState,
+            newText: "Local edit before conflict\n",
+            editedAt: Date(timeIntervalSince1970: 1_786_801_600),
+            recoveryStore: fixture.recoveryStore
+        )
+        let preparation = try prepareSaveAs(
+            state: editedState,
+            fileName: "Existing.txt",
+            encoding: .utf8,
+            recoveryEditedAt: Date(timeIntervalSince1970: 1_786_801_700)
+        )
+        let preflight = try await preflightPreparedSaveAs(
+            state: editedState,
+            preparedSave: preparation,
+            selectedDirectoryURL: fixture.filesURL,
+            fileAccessConnector: connector,
+            recoveryStore: fixture.recoveryStore
+        )
+        guard case .replacementRequired = preflight.target else {
+            return XCTFail("Clean existing target must require replacement confirmation.")
+        }
+        let conflictedState = try markDocumentFileConflict(
+            state: editedState,
+            documentID: documentID,
+            conflict: .stableIdentityChanged
+        )
+        let stateBeforeAttempt = conflictedState
+        var stateAfterAttempt = conflictedState
+        let loadedRecoveryBeforeAttempt = try await fixture.recoveryStore.load(
+            documentID: documentID
+        )
+        let recoveryBeforeAttempt = try XCTUnwrap(loadedRecoveryBeforeAttempt)
+
+        do {
+            let result = try await saveConfirmedReplacementPreparedSaveAs(
+                state: conflictedState,
+                preflight: preflight,
+                fileAccessConnector: connector,
+                recoveryStore: fixture.recoveryStore
+            )
+            stateAfterAttempt = result.state
+            XCTFail("Stored replacement preflight wrote after stable-identity conflict.")
+        } catch let error as SaveAsWorkflowError {
+            XCTAssertEqual(
+                error,
+                .currentFileHasConflict(
+                    documentID: documentID,
+                    conflict: .stableIdentityChanged
+                )
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let recoveryAfterAttempt = try await fixture.recoveryStore.load(
+            documentID: documentID
+        )
+        XCTAssertEqual(stateAfterAttempt, stateBeforeAttempt)
+        XCTAssertEqual(recoveryAfterAttempt, recoveryBeforeAttempt)
+        XCTAssertEqual(try Data(contentsOf: targetURL), externalBytes)
+    }
+
     private func makeSaveAsFixture() throws -> SaveAsWorkflowFixture {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -531,6 +886,44 @@ final class PhonePadSaveAsWorkflowTests: XCTestCase {
 private struct SaveAsWorkflowFixture {
     let filesURL: URL
     let recoveryStore: FileRecoveryStore
+}
+
+private func makeStableIdentityConflictConnector(
+    boundURL: URL,
+    externalIdentity: FileIdentity
+) -> FileAccessConnector {
+    FileAccessConnector(
+        fileManager: .default,
+        bookmarkCreator: { url in
+            try url.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        },
+        bookmarkResolver: { bookmark in
+            if bookmark.data == Data([0x01]) {
+                return ResolvedFileBookmark(url: boundURL, isStale: false)
+            }
+            var isStale = false
+            let url = try URL(
+                resolvingBookmarkData: bookmark.data,
+                options: [.withoutUI, .withoutImplicitStartAccessing],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+            return ResolvedFileBookmark(url: url, isStale: isStale)
+        },
+        identityReader: { _ in externalIdentity },
+        replacer: { originalURL, replacementURL, fileManager in
+            try fileManager.replaceItemAt(
+                originalURL,
+                withItemAt: replacementURL,
+                backupItemName: nil,
+                options: []
+            )
+        }
+    )
 }
 
 private func makeSaveAsSourceBinding() throws -> FileBinding {

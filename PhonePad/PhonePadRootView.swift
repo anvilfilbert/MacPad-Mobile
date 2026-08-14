@@ -63,6 +63,7 @@ struct PhonePadRootView: View {
     @State private var preparedSaveAs: PreparedSaveAs?
     @State private var folderPickerIsPresented: Bool
     @State private var saveAsValidationError: String?
+    @State private var saveAsWasPresentedFromFileConflict: Bool
     @State private var filePickerIsPresented: Bool
     @State private var fileAction: PhonePadFileAction?
 
@@ -77,6 +78,7 @@ struct PhonePadRootView: View {
         preparedSaveAs = nil
         folderPickerIsPresented = false
         saveAsValidationError = nil
+        saveAsWasPresentedFromFileConflict = false
         filePickerIsPresented = false
         fileAction = nil
     }
@@ -125,6 +127,9 @@ struct PhonePadRootView: View {
         }
         .sheet(isPresented: $saveAsIsPresented, onDismiss: resetSaveAsPresentation) {
             saveAsSheet
+        }
+        .sheet(isPresented: fileConflictResolutionIsPresented) {
+            fileConflictResolutionSheet
         }
         .sheet(isPresented: $filePickerIsPresented) {
             PhonePadFilePicker(
@@ -310,7 +315,15 @@ struct PhonePadRootView: View {
 
     @ViewBuilder
     private var fileSaveFeedback: some View {
-        if !saveAsIsPresented, model.fileSaveInProgress,
+        if !saveAsIsPresented,
+           !model.fileConflictResolutionIsPresented,
+           let fileConflictError = model.fileConflictError {
+            fileReconciliationErrorBanner(message: fileConflictError)
+        } else if !saveAsIsPresented,
+                  !model.fileConflictResolutionIsPresented,
+                  let conflict = model.activeFileConflict {
+            fileConflictFeedbackBanner(conflict: conflict)
+        } else if !saveAsIsPresented, model.fileSaveInProgress,
            let fileAction {
             ProgressView(fileAction.progressLabel)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -334,6 +347,50 @@ struct PhonePadRootView: View {
                 messageIdentifier: "phonepad.save.notice"
             )
         }
+    }
+
+    private func fileReconciliationErrorBanner(message: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(message)
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("phonepad.file-reconciliation.error")
+
+            Button("Retry") {
+                Task { @MainActor in
+                    await model.retryActiveFileReconciliation()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.white)
+            .foregroundStyle(.red)
+            .accessibilityIdentifier("phonepad.file-reconciliation.retry")
+        }
+        .foregroundStyle(.white)
+        .padding(8)
+        .background(Color.red)
+    }
+
+    private func fileConflictFeedbackBanner(
+        conflict: FileConflict
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(fileConflictDescription(conflict))
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("phonepad.file-conflict.banner")
+
+            Button("Resolve") {
+                model.presentFileConflictResolution()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.white)
+            .foregroundStyle(.red)
+            .accessibilityIdentifier("phonepad.file-conflict.resolve")
+        }
+        .foregroundStyle(.white)
+        .padding(8)
+        .background(Color.red)
     }
 
     private func cleanupRequiredFeedbackBanner(message: String) -> some View {
@@ -415,6 +472,16 @@ struct PhonePadRootView: View {
     }
 
     private func presentSaveAsAfterEditorCommit() {
+        saveAsWasPresentedFromFileConflict = false
+        configureSaveAsPresentation()
+    }
+
+    private func presentConflictSaveAsAfterEditorCommit() {
+        saveAsWasPresentedFromFileConflict = true
+        configureSaveAsPresentation()
+    }
+
+    private func configureSaveAsPresentation() {
         saveAsFileName = suggestedFileName()
         saveAsEncoding = model.state.activeTab.document.fileBinding?.encoding ?? .utf8
         preparedSaveAs = nil
@@ -553,6 +620,104 @@ struct PhonePadRootView: View {
         .presentationDetents([.medium])
     }
 
+    private var fileConflictResolutionIsPresented: Binding<Bool> {
+        Binding(
+            get: { model.fileConflictResolutionIsPresented },
+            set: { isPresented in
+                if !isPresented {
+                    model.cancelFileConflictResolution()
+                }
+            }
+        )
+    }
+
+    private var fileConflictResolutionSheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Label("File Conflict", systemImage: "exclamationmark.triangle.fill")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.red)
+
+                if let conflict = model.activeFileConflict {
+                    Text(fileConflictDescription(conflict))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("phonepad.file-conflict.reason")
+                }
+
+                if let fileConflictError = model.fileConflictError {
+                    Text(fileConflictError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("phonepad.file-conflict.error")
+                }
+
+                if model.fileSaveInProgress {
+                    ProgressView("Reloading Current File")
+                        .accessibilityIdentifier("phonepad.file-conflict.progress")
+                }
+
+                Spacer()
+
+                Button("Discard Edits and Reload Current", role: .destructive) {
+                    reloadCurrentFileFromConflict()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .frame(maxWidth: .infinity)
+                .disabled(model.fileSaveInProgress)
+                .accessibilityIdentifier("phonepad.file-conflict.reload-current")
+
+                Button("Save As") {
+                    presentSaveAsFromFileConflict()
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+                .disabled(model.fileSaveInProgress)
+                .accessibilityIdentifier("phonepad.file-conflict.save-as")
+
+                Button("Cancel", role: .cancel) {
+                    model.cancelFileConflictResolution()
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+                .disabled(model.fileSaveInProgress)
+                .accessibilityIdentifier("phonepad.file-conflict.cancel")
+            }
+            .padding()
+            .navigationTitle("Resolve File Conflict")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("phonepad.file-conflict.sheet")
+        .interactiveDismissDisabled()
+        .presentationDetents([.medium, .large])
+    }
+
+    private func reloadCurrentFileFromConflict() {
+        do {
+            try editorTransitionController.commitMarkedText()
+        } catch {
+            model.reportFileConflictTransitionError(error)
+            return
+        }
+        Task { @MainActor in
+            _ = await model.discardEditsAndReloadCurrentFile()
+        }
+    }
+
+    private func presentSaveAsFromFileConflict() {
+        do {
+            try editorTransitionController.commitMarkedText()
+        } catch {
+            model.reportFileConflictTransitionError(error)
+            return
+        }
+        guard model.beginSaveAsFromFileConflict() else {
+            return
+        }
+        presentConflictSaveAsAfterEditorCommit()
+    }
+
     private func confirmSaveAsReplacement() {
         Task { @MainActor in
             let saved = await model.confirmReplacementAndCompleteSaveAs()
@@ -571,11 +736,17 @@ struct PhonePadRootView: View {
     }
 
     private func resetSaveAsPresentation() {
+        let shouldReturnToFileConflict = saveAsWasPresentedFromFileConflict
+            && model.activeFileConflict != nil
         model.cancelSaveAsReplacement()
         preparedSaveAs = nil
         saveAsValidationError = nil
         folderPickerIsPresented = false
         fileAction = nil
+        saveAsWasPresentedFromFileConflict = false
+        if shouldReturnToFileConflict {
+            model.presentFileConflictResolution()
+        }
     }
 
     private func retrySaveCleanupFromSheet() {
@@ -911,6 +1082,19 @@ struct PhonePadRootView: View {
             return "Protecting edits"
         case .protectedUnsaved:
             return "Edits protected"
+        }
+    }
+
+    private func fileConflictDescription(_ conflict: FileConflict) -> String {
+        switch conflict {
+        case .contentChanged:
+            return "Original File content changed outside PhonePad. Current edits were not overwritten."
+        case .stableIdentityChanged:
+            return "Original File identity changed outside PhonePad. Current edits were not overwritten."
+        case .ambiguousLocatorChange:
+            return "Original File moved without a stable provider identity. Current edits were not overwritten."
+        case let .unresolvedProviderVersions(count):
+            return "Original File has \(count) unresolved provider conflict version(s). PhonePad will not resolve them; use Files or the provider before saving to this File."
         }
     }
 }

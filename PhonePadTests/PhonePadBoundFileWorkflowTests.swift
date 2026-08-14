@@ -343,6 +343,60 @@ final class PhonePadBoundFileWorkflowTests: XCTestCase {
         )
     }
 
+    func testKnownFileConflictBlocksBoundSaveBeforeRecoveryOrFileWrite() async throws {
+        let originalBytes = Data("Original\n".utf8)
+        let fixture = try makeFixture(
+            fileName: "Conflicted.txt",
+            sourceBytes: originalBytes
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+        let openedState = try await openState(
+            sourceURL: fixture.sourceURL,
+            connector: connector
+        )
+        let editedState = try beginActiveDocumentEdit(
+            state: openedState,
+            newText: "Protected local edit\n",
+            editedAt: Date(timeIntervalSince1970: 1_770_000_650)
+        ).state
+        let preparedSave = try prepareBoundFileSave(
+            state: editedState,
+            recoveryEditedAt: Date(timeIntervalSince1970: 1_770_000_660)
+        )
+        let conflictedState = try markDocumentFileConflict(
+            state: editedState,
+            documentID: editedState.activeTab.document.id,
+            conflict: .contentChanged
+        )
+
+        let saveError = await capturedError {
+            _ = try await savePreparedBoundDocument(
+                state: conflictedState,
+                preparedSave: preparedSave,
+                fileAccessConnector: connector,
+                recoveryStore: fixture.recoveryStore
+            )
+        }
+
+        XCTAssertEqual(
+            saveError as? SavedDocumentTransitionError,
+            .fileConflictRequiresExplicitResolution(.contentChanged)
+        )
+        XCTAssertEqual(try Data(contentsOf: fixture.sourceURL), originalBytes)
+        let storedRecovery = try await fixture.recoveryStore.load(
+            documentID: conflictedState.activeTab.document.id
+        )
+        XCTAssertNil(storedRecovery)
+        XCTAssertEqual(
+            conflictedState.activeTab.document.text,
+            "Protected local edit\n"
+        )
+        XCTAssertEqual(
+            conflictedState.activeTab.document.fileConflict,
+            .contentChanged
+        )
+    }
+
     func testRecoveryFailurePreventsBoundFileWrite() async throws {
         let fixture = try makeFixture(originalText: "Original\n")
         let connector = FileAccessConnector(fileManager: .default)
@@ -432,16 +486,23 @@ final class PhonePadBoundFileWorkflowTests: XCTestCase {
         sourceURL: URL,
         connector: FileAccessConnector
     ) async throws -> PhonePadState {
-        let openedFile = try await connector.openTextFile(at: sourceURL)
-        return openBoundDocument(
+        let documentID = DocumentID(rawValue: UUID())
+        let openedSnapshot = try await connector.openTextFile(
+            at: sourceURL,
+            documentID: documentID
+        )
+        return openObservedBoundDocument(
             state: makeInitialPhonePadState(
                 documentID: DocumentID(rawValue: UUID()),
                 tabID: TabID(rawValue: UUID())
             ),
-            documentID: DocumentID(rawValue: UUID()),
+            documentID: documentID,
             tabID: TabID(rawValue: UUID()),
-            text: openedFile.text,
-            fileBinding: openedFile.binding
+            text: openedSnapshot.openedFile.text,
+            observation: ObservedBoundFile(
+                binding: openedSnapshot.openedFile.binding,
+                providerConflictVersions: openedSnapshot.providerConflictVersions
+            )
         )
     }
 }

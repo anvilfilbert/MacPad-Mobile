@@ -234,6 +234,108 @@ public struct FileBinding: Equatable, Sendable {
     }
 }
 
+public enum FileConflict: Equatable, Sendable {
+    case contentChanged
+    case stableIdentityChanged
+    case ambiguousLocatorChange
+    case unresolvedProviderVersions(count: Int)
+}
+
+public enum FileProviderConflictVersions: Equatable, Sendable {
+    case none
+    case unresolved(count: Int)
+}
+
+public struct ObservedBoundFile: Equatable, Sendable {
+    public let binding: FileBinding
+    public let providerConflictVersions: FileProviderConflictVersions
+
+    public init(
+        binding: FileBinding,
+        providerConflictVersions: FileProviderConflictVersions
+    ) {
+        self.binding = binding
+        self.providerConflictVersions = providerConflictVersions
+    }
+}
+
+public enum FileReconciliationResult: Equatable, Sendable {
+    case continuous(updatedBinding: FileBinding)
+    case conflicted(retainedBinding: FileBinding, conflict: FileConflict)
+}
+
+public func reconcileFileBinding(
+    baseline: FileBinding,
+    observation: ObservedBoundFile
+) -> FileReconciliationResult {
+    let observedBinding = observation.binding
+    let retainedBinding: FileBinding
+
+    switch (baseline.identity, observedBinding.identity) {
+    case let (.some(baselineIdentity), .some(observedIdentity)):
+        guard baselineIdentity == observedIdentity else {
+            return .conflicted(
+                retainedBinding: baseline,
+                conflict: .stableIdentityChanged
+            )
+        }
+        retainedBinding = retainingBaselineContent(
+            baseline: baseline,
+            observedBinding: observedBinding
+        )
+    case (.none, .none):
+        guard baseline.locatorURL.standardizedFileURL
+                == observedBinding.locatorURL.standardizedFileURL else {
+            return .conflicted(
+                retainedBinding: baseline,
+                conflict: .ambiguousLocatorChange
+            )
+        }
+        retainedBinding = retainingBaselineContent(
+            baseline: baseline,
+            observedBinding: observedBinding
+        )
+    case (.some, .none), (.none, .some):
+        return .conflicted(
+            retainedBinding: baseline,
+            conflict: .stableIdentityChanged
+        )
+    }
+
+    switch observation.providerConflictVersions {
+    case .none:
+        break
+    case let .unresolved(count):
+        return .conflicted(
+            retainedBinding: retainedBinding,
+            conflict: .unresolvedProviderVersions(count: count)
+        )
+    }
+
+    guard observedBinding.digest == baseline.digest else {
+        return .conflicted(
+            retainedBinding: retainedBinding,
+            conflict: .contentChanged
+        )
+    }
+    return .continuous(updatedBinding: retainedBinding)
+}
+
+private func retainingBaselineContent(
+    baseline: FileBinding,
+    observedBinding: FileBinding
+) -> FileBinding {
+    FileBinding(
+        locatorURL: observedBinding.locatorURL,
+        bookmark: observedBinding.bookmark,
+        identity: baseline.identity,
+        displayName: baseline.displayName,
+        digest: baseline.digest,
+        encoding: baseline.encoding,
+        lineEnding: baseline.lineEnding
+    )
+}
+
 public struct RecoveryFileReference: Codable, Equatable, Hashable, Sendable {
     public let bookmark: FileBookmark
     public let identity: FileIdentity?

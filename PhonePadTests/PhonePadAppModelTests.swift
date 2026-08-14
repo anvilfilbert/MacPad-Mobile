@@ -423,7 +423,12 @@ final class PhonePadAppModelTests: XCTestCase {
         }
         let didSave = await model.completePreflightedSaveAs(preflight)
 
-        XCTAssertTrue(didSave)
+        XCTAssertTrue(
+            didSave,
+            model.fileSaveError
+                ?? model.recoveryError
+                ?? "Save returned false without a published error."
+        )
         XCTAssertEqual(model.state.activeTab.document.title, "Notes.txt")
         XCTAssertEqual(model.state.activeTab.document.text, "Latest\ntext")
         XCTAssertFalse(model.state.activeTab.document.isUnsaved)
@@ -1042,7 +1047,9 @@ final class PhonePadAppModelTests: XCTestCase {
             model.state.activeTab.document.recoveryState,
             .protectedUnsaved
         )
-        XCTAssertNotNil(model.fileSaveError)
+        XCTAssertEqual(model.activeFileConflict, .contentChanged)
+        XCTAssertTrue(model.fileConflictResolutionIsPresented)
+        XCTAssertNil(model.fileSaveError)
         let loadedRecovery = try await store.load(
             documentID: model.state.activeTab.document.id
         )

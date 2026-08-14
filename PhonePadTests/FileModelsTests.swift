@@ -558,6 +558,15 @@ final class FileModelsTests: XCTestCase {
             identity: sharedIdentity,
             text: "Changed external content must not replace open state"
         )
+        let reconciledBinding = FileBinding(
+            locatorURL: movedBinding.locatorURL,
+            bookmark: movedBinding.bookmark,
+            identity: firstBinding.identity,
+            displayName: firstBinding.displayName,
+            digest: firstBinding.digest,
+            encoding: firstBinding.encoding,
+            lineEnding: firstBinding.lineEnding
+        )
 
         let duplicateOpen = openBoundDocument(
             state: secondOpen,
@@ -570,7 +579,8 @@ final class FileModelsTests: XCTestCase {
         XCTAssertEqual(duplicateOpen.tabs.count, 2)
         XCTAssertEqual(duplicateOpen.activeTabID, firstTabID)
         XCTAssertEqual(duplicateOpen.activeTab.document.text, "Original tab")
-        XCTAssertEqual(duplicateOpen.activeTab.document.fileBinding, firstBinding)
+        XCTAssertEqual(duplicateOpen.activeTab.document.fileBinding, reconciledBinding)
+        XCTAssertEqual(duplicateOpen.activeTab.document.fileConflict, .contentChanged)
     }
 
     func testBoundFileMatchingUsesStableIdentityAcrossLocatorMove() throws {

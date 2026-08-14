@@ -87,7 +87,7 @@ public func prepareBoundFileSave(
     recoveryEditedAt: Date
 ) throws -> PreparedBoundFileSave {
     let document = state.activeTab.document
-    guard let fileBinding = document.fileBinding else {
+    guard document.fileBinding != nil else {
         throw BoundFileSaveWorkflowError.activeDocumentIsNotBound(document.id)
     }
     guard document.isUnsaved else {
@@ -95,6 +95,10 @@ public func prepareBoundFileSave(
             document.id
         )
     }
+    let fileBinding = try requireBoundFileSaveAllowed(
+        state: state,
+        documentID: document.id
+    )
 
     let encodedFile = try encodeTextFile(
         text: document.text,
@@ -184,6 +188,7 @@ public func saveProtectedBoundDocument<RecoveryStore: RecoveryStoring>(
     }
 
     let saveOutcome = try await fileAccessConnector.saveTextFile(
+        documentID: preparedSave.documentID,
         binding: preparedSave.sourceBinding,
         encodedFile: preparedSave.encodedFile
     )
@@ -239,6 +244,10 @@ private func validatePreparedBoundSave(
             document.id
         )
     }
+    _ = try requireBoundFileSaveAllowed(
+        state: state,
+        documentID: preparedSave.documentID
+    )
 }
 
 private func makeBoundFileSaveResult(

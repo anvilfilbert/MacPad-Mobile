@@ -6,6 +6,52 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testFileConflictUsesStableExplicitResolutionIdentifiers() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launchEnvironment["PHONEPAD_UI_TEST_FILE_CONFLICT"] = "1"
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let conflictSheet = app.descendants(matching: .any)[
+            "phonepad.file-conflict.sheet"
+        ].firstMatch
+        XCTAssertTrue(conflictSheet.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts["phonepad.file-conflict.reason"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            app.buttons["phonepad.file-conflict.reload-current"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            app.buttons["phonepad.file-conflict.save-as"]
+                .waitForExistence(timeout: 2)
+        )
+        let cancel = app.buttons["phonepad.file-conflict.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 2))
+
+        cancel.tap()
+
+        XCTAssertFalse(conflictSheet.exists)
+        XCTAssertTrue(
+            app.staticTexts["phonepad.file-conflict.banner"]
+                .waitForExistence(timeout: 5)
+        )
+        let actionMenu = app.descendants(matching: .any)["phonepad.action-menu"]
+            .firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 2))
+        actionMenu.tap()
+        let save = app.buttons["phonepad.action-menu.save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 2))
+        save.tap()
+
+        XCTAssertTrue(conflictSheet.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testRecoveryRequiresExplicitUserActionAcrossFreshLaunches() {
         let app = XCUIApplication()
         app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
