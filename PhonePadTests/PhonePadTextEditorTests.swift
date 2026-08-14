@@ -1,3 +1,4 @@
+import PhonePadCore
 import SwiftUI
 import UIKit
 import XCTest
@@ -5,12 +6,16 @@ import XCTest
 
 @MainActor
 private final class EditorTestModel: ObservableObject {
+    @Published var documentID: DocumentID
     @Published var text: String
     @Published var isEditable: Bool
+    @Published var renderGeneration: UInt64
 
-    init(text: String, isEditable: Bool) {
+    init(documentID: DocumentID, text: String, isEditable: Bool) {
+        self.documentID = documentID
         self.text = text
         self.isEditable = isEditable
+        renderGeneration = 0
     }
 }
 
@@ -20,7 +25,9 @@ private struct EditorHarness: View {
     let transitionController: PhonePadEditorTransitionController
 
     var body: some View {
+        let _ = model.renderGeneration
         PhonePadTextEditor(
+            documentID: model.documentID,
             text: $model.text,
             isEditable: model.isEditable,
             transitionController: transitionController
@@ -144,10 +151,44 @@ final class PhonePadTextEditorTests: XCTestCase {
         XCTAssertNotEqual(fixture.model.text, displayedComposition)
         XCTAssertNotNil(fixture.textView.markedTextRange)
 
-        try fixture.transitionController.commitMarkedText()
+        let committedDocument = try fixture.transitionController.commitMarkedText()
 
         XCTAssertNil(fixture.textView.markedTextRange)
         XCTAssertEqual(fixture.model.text, displayedComposition)
+        XCTAssertEqual(committedDocument.documentID, fixture.model.documentID)
+        XCTAssertEqual(committedDocument.text, displayedComposition)
+    }
+
+    @MainActor
+    func testDocumentSwitchIsolatesUndoWhileSameDocumentRenderPreservesComposition() throws {
+        let fixture = try makeHostedEditor(text: "First", isEditable: true)
+        defer { destroy(fixture) }
+
+        fixture.textView.selectedRange = NSRange(location: 5, length: 0)
+        fixture.textView.insertText(" document")
+        fixture.textView.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 1, length: 0)
+        )
+        render(fixture.controller)
+        let markedText = fixture.textView.text
+
+        fixture.model.renderGeneration += 1
+        render(fixture.controller)
+
+        let reorderedTextView = try requireTextView(in: fixture.controller.view)
+        XCTAssertTrue(reorderedTextView === fixture.textView)
+        XCTAssertNotNil(reorderedTextView.markedTextRange)
+        XCTAssertEqual(reorderedTextView.text, markedText)
+
+        fixture.model.text = "Second"
+        fixture.model.documentID = DocumentID(rawValue: UUID())
+        render(fixture.controller)
+
+        let switchedTextView = try requireTextView(in: fixture.controller.view)
+        XCTAssertFalse(switchedTextView === fixture.textView)
+        XCTAssertEqual(switchedTextView.text, "Second")
+        XCTAssertFalse(try XCTUnwrap(switchedTextView.undoManager).canUndo)
     }
 
     @MainActor
@@ -194,7 +235,11 @@ final class PhonePadTextEditorTests: XCTestCase {
             throw EditorHarnessError.missingForegroundWindowScene
         }
 
-        let model = EditorTestModel(text: text, isEditable: isEditable)
+        let model = EditorTestModel(
+            documentID: DocumentID(rawValue: UUID()),
+            text: text,
+            isEditable: isEditable
+        )
         let transitionController = PhonePadEditorTransitionController()
         let controller = UIHostingController(
             rootView: EditorHarness(

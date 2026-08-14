@@ -1,28 +1,42 @@
+import PhonePadCore
 import SwiftUI
 import UIKit
+
+struct CommittedEditorDocument: Equatable, Sendable {
+    let documentID: DocumentID
+    let text: String
+}
 
 @MainActor
 final class PhonePadEditorTransitionController {
     private weak var textView: UITextView?
-    private weak var coordinator: PhonePadTextEditor.Coordinator?
+    private weak var coordinator: PhonePadEditorCoordinator?
 
     init() {}
 
-    func commitMarkedText() throws {
+    func commitMarkedText() throws -> CommittedEditorDocument {
         guard let textView,
               let coordinator else {
             throw PhonePadEditorTransitionError.editorUnavailable
         }
         textView.unmarkText()
-        coordinator.synchronizeForDocumentTransition(in: textView)
+        return coordinator.synchronizeForDocumentTransition(in: textView)
     }
 
     fileprivate func connect(
         textView: UITextView,
-        coordinator: PhonePadTextEditor.Coordinator
+        coordinator: PhonePadEditorCoordinator
     ) {
         self.textView = textView
         self.coordinator = coordinator
+    }
+
+    fileprivate func disconnect(coordinator: PhonePadEditorCoordinator) {
+        guard self.coordinator === coordinator else {
+            return
+        }
+        textView = nil
+        self.coordinator = nil
     }
 }
 
@@ -37,27 +51,48 @@ enum PhonePadEditorTransitionError: Error, LocalizedError {
     }
 }
 
-struct PhonePadTextEditor: UIViewRepresentable {
+struct PhonePadTextEditor: View {
+    private let documentID: DocumentID
     @Binding private var text: String
     private let isEditable: Bool
     private let transitionController: PhonePadEditorTransitionController
 
     init(
+        documentID: DocumentID,
         text: Binding<String>,
         isEditable: Bool,
         transitionController: PhonePadEditorTransitionController
     ) {
+        self.documentID = documentID
         _text = text
         self.isEditable = isEditable
         self.transitionController = transitionController
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
+    var body: some View {
+        PhonePadTextEditorRepresentable(
+            documentID: documentID,
+            text: $text,
+            isEditable: isEditable,
+            transitionController: transitionController
+        )
+        .id(documentID)
+    }
+}
+
+private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
+    let documentID: DocumentID
+    @Binding var text: String
+    let isEditable: Bool
+    let transitionController: PhonePadEditorTransitionController
+
+    func makeCoordinator() -> PhonePadEditorCoordinator {
+        PhonePadEditorCoordinator(documentID: documentID, text: $text)
     }
 
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
+        context.coordinator.transitionController = transitionController
         textView.delegate = context.coordinator
         textView.text = text
         textView.isEditable = isEditable
@@ -78,7 +113,7 @@ struct PhonePadTextEditor: UIViewRepresentable {
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        context.coordinator.update(text: $text)
+        context.coordinator.update(documentID: documentID, text: $text)
         textView.isEditable = isEditable
         textView.isSelectable = true
 
@@ -111,76 +146,96 @@ struct PhonePadTextEditor: UIViewRepresentable {
         return NSRange(location: location, length: min(selection.length, availableLength))
     }
 
-    final class Coordinator: NSObject, UITextViewDelegate {
-        private var text: Binding<String>
-        private var deferredModelText: String?
-        private var compositionIsActive = false
+    static func dismantleUIView(
+        _ textView: UITextView,
+        coordinator: PhonePadEditorCoordinator
+    ) {
+        coordinator.transitionController?.disconnect(coordinator: coordinator)
+        textView.delegate = nil
+    }
+}
 
-        init(text: Binding<String>) {
-            self.text = text
+@MainActor
+fileprivate final class PhonePadEditorCoordinator: NSObject, UITextViewDelegate {
+    fileprivate weak var transitionController: PhonePadEditorTransitionController?
+    private var documentID: DocumentID
+    private var text: Binding<String>
+    private var deferredModelText: String?
+    private var compositionIsActive = false
+
+    init(documentID: DocumentID, text: Binding<String>) {
+        self.documentID = documentID
+        self.text = text
+    }
+
+    func update(documentID: DocumentID, text: Binding<String>) {
+        self.documentID = documentID
+        self.text = text
+    }
+
+    func deferModelText(_ modelText: String, displayedText: String) {
+        compositionIsActive = true
+        guard modelText != displayedText else {
+            return
+        }
+        deferredModelText = modelText
+    }
+
+    @discardableResult
+    func reconcileCommittedComposition(in textView: UITextView) -> Bool {
+        guard compositionIsActive, textView.markedTextRange == nil else {
+            return false
         }
 
-        func update(text: Binding<String>) {
-            self.text = text
+        compositionIsActive = false
+        let hadDeferredModelText = deferredModelText != nil
+        deferredModelText = nil
+
+        guard hadDeferredModelText else {
+            return false
         }
 
-        func deferModelText(_ modelText: String, displayedText: String) {
+        synchronizeBinding(with: textView)
+        return true
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+        if textView.markedTextRange != nil {
             compositionIsActive = true
-            guard modelText != displayedText else {
-                return
-            }
-            deferredModelText = modelText
+        } else if reconcileCommittedComposition(in: textView) {
+            return
         }
 
-        @discardableResult
-        func reconcileCommittedComposition(in textView: UITextView) -> Bool {
-            guard compositionIsActive, textView.markedTextRange == nil else {
-                return false
-            }
+        synchronizeBinding(with: textView)
+    }
 
-            compositionIsActive = false
-            let hadDeferredModelText = deferredModelText != nil
-            deferredModelText = nil
-
-            guard hadDeferredModelText else {
-                return false
-            }
-
-            synchronizeBinding(with: textView)
-            return true
+    func textViewDidChangeSelection(_ textView: UITextView) {
+        if textView.markedTextRange != nil {
+            compositionIsActive = true
+            return
         }
 
-        func textViewDidChange(_ textView: UITextView) {
-            if textView.markedTextRange != nil {
-                compositionIsActive = true
-            } else if reconcileCommittedComposition(in: textView) {
-                return
-            }
+        _ = reconcileCommittedComposition(in: textView)
+    }
 
-            synchronizeBinding(with: textView)
+    func synchronizeForDocumentTransition(
+        in textView: UITextView
+    ) -> CommittedEditorDocument {
+        compositionIsActive = false
+        deferredModelText = nil
+        let committedText = textView.text ?? ""
+        synchronizeBinding(with: textView)
+        return CommittedEditorDocument(
+            documentID: documentID,
+            text: committedText
+        )
+    }
+
+    private func synchronizeBinding(with textView: UITextView) {
+        let updatedText = textView.text ?? ""
+        guard text.wrappedValue != updatedText else {
+            return
         }
-
-        func textViewDidChangeSelection(_ textView: UITextView) {
-            if textView.markedTextRange != nil {
-                compositionIsActive = true
-                return
-            }
-
-            _ = reconcileCommittedComposition(in: textView)
-        }
-
-        func synchronizeForDocumentTransition(in textView: UITextView) {
-            compositionIsActive = false
-            deferredModelText = nil
-            synchronizeBinding(with: textView)
-        }
-
-        private func synchronizeBinding(with textView: UITextView) {
-            let updatedText = textView.text ?? ""
-            guard text.wrappedValue != updatedText else {
-                return
-            }
-            text.wrappedValue = updatedText
-        }
+        text.wrappedValue = updatedText
     }
 }

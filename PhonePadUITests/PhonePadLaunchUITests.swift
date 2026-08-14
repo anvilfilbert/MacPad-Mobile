@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 final class PhonePadLaunchUITests: XCTestCase {
@@ -52,6 +53,38 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testLongFileTitleKeepsTabDragControlReachable() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launchEnvironment["PHONEPAD_UI_TEST_FILE_CONFLICT"] = "1"
+        app.launch()
+
+        let conflictSheet = app.descendants(matching: .any)[
+            "phonepad.file-conflict.sheet"
+        ].firstMatch
+        XCTAssertTrue(conflictSheet.waitForExistence(timeout: 10))
+        let cancel = app.buttons["phonepad.file-conflict.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 2))
+        cancel.tap()
+        XCTAssertFalse(conflictSheet.exists)
+
+        let tabs = tabItems(in: app)
+        XCTAssertEqual(tabs.count, 1)
+        let tab = tabs.element(boundBy: 0)
+        XCTAssertGreaterThan(tab.label.count, 100)
+        let tabSuffix = String(
+            tab.identifier.dropFirst("phonepad.tab.item.".count)
+        )
+        let select = app.buttons["phonepad.tab.select.\(tabSuffix)"]
+        let drag = app.descendants(matching: .any)[
+            "phonepad.tab.drag.\(tabSuffix)"
+        ].firstMatch
+        XCTAssertTrue(waitForHittable(select, timeout: 5))
+        XCTAssertTrue(waitForHittable(drag, timeout: 5))
+        XCTAssertLessThanOrEqual(select.frame.width, 220.01)
+    }
+
+    @MainActor
     func testRecoveryRequiresExplicitUserActionAcrossFreshLaunches() {
         let app = XCUIApplication()
         app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
@@ -60,7 +93,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         let root = app.descendants(matching: .any)["phonepad.root"]
         XCTAssertTrue(root.waitForExistence(timeout: 5))
 
-        let tabs = app.descendants(matching: .any).matching(identifier: "phonepad.tab.item")
+        let tabs = tabItems(in: app)
         XCTAssertEqual(tabs.count, 1)
         let activeTab = tabs.firstMatch
         XCTAssertEqual(activeTab.label, "Untitled")
@@ -123,7 +156,7 @@ final class PhonePadLaunchUITests: XCTestCase {
 
         let root = app.descendants(matching: .any)["phonepad.root"]
         XCTAssertTrue(root.waitForExistence(timeout: 5))
-        let tabs = app.descendants(matching: .any).matching(identifier: "phonepad.tab.item")
+        let tabs = tabItems(in: app)
         XCTAssertEqual(tabs.count, 1)
         let activeTab = tabs.firstMatch
         let editor = app.textViews["phonepad.editor.text-view"]
@@ -313,6 +346,137 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testMultipleTabsSelectAndReorderUsingStableIdentifiers() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let newTab = app.buttons["phonepad.toolbar.new-tab"]
+        XCTAssertTrue(newTab.waitForExistence(timeout: 5))
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let tabs = tabItems(in: app)
+        XCTAssertEqual(tabs.count, 1)
+
+        editor.tap()
+        editor.typeText("First Tab State")
+        newTab.tap()
+        XCTAssertTrue(waitForCount(tabs, count: 2, timeout: 5))
+
+        editor.tap()
+        editor.typeText("Second Tab State")
+        newTab.tap()
+        XCTAssertTrue(waitForCount(tabs, count: 3, timeout: 5))
+
+        editor.tap()
+        editor.typeText("Third Tab State")
+
+        let initialIdentifiers = tabs.allElementsBoundByIndex.map(\.identifier)
+        XCTAssertEqual(initialIdentifiers.count, 3)
+        XCTAssertEqual(Set(initialIdentifiers).count, 3)
+        for identifier in initialIdentifiers {
+            XCTAssertTrue(identifier.hasPrefix("phonepad.tab.item."))
+        }
+
+        let firstSuffix = String(
+            initialIdentifiers[0].dropFirst("phonepad.tab.item.".count)
+        )
+        let secondSuffix = String(
+            initialIdentifiers[1].dropFirst("phonepad.tab.item.".count)
+        )
+        let thirdSuffix = String(
+            initialIdentifiers[2].dropFirst("phonepad.tab.item.".count)
+        )
+        let firstSelect = app.buttons["phonepad.tab.select.\(firstSuffix)"]
+        let tabStrip = app.scrollViews["phonepad.tab-strip"]
+        XCTAssertTrue(tabStrip.waitForExistence(timeout: 2))
+
+        let secondDrag = app.descendants(matching: .any)[
+            "phonepad.tab.drag.\(secondSuffix)"
+        ].firstMatch
+        let thirdDrag = app.descendants(matching: .any)[
+            "phonepad.tab.drag.\(thirdSuffix)"
+        ].firstMatch
+        XCTAssertTrue(secondDrag.waitForExistence(timeout: 2))
+        XCTAssertTrue(thirdDrag.waitForExistence(timeout: 2))
+        XCTAssertTrue(waitForHittable(secondDrag, timeout: 5))
+        XCTAssertTrue(waitForHittable(thirdDrag, timeout: 5))
+        XCTAssertTrue(secondDrag.isEnabled)
+        XCTAssertTrue(thirdDrag.isEnabled)
+        XCTAssertLessThan(secondDrag.frame.midX, thirdDrag.frame.midX)
+        secondDrag.press(
+            forDuration: 1,
+            thenDragTo: thirdDrag,
+            withVelocity: .slow,
+            thenHoldForDuration: 1
+        )
+
+        XCTAssertTrue(
+            waitForTabOrder(
+                tabs,
+                expectedIdentifiers: [
+                    initialIdentifiers[0],
+                    initialIdentifiers[2],
+                    initialIdentifiers[1]
+                ],
+                timeout: 5
+            )
+        )
+        XCTAssertEqual(editor.value as? String, "Third Tab State")
+
+        XCTAssertTrue(firstSelect.waitForExistence(timeout: 2))
+        tabStrip.swipeRight()
+        XCTAssertTrue(waitForHittable(firstSelect, timeout: 5))
+        firstSelect.tap()
+        XCTAssertTrue(waitForValue(editor, value: "First Tab State", timeout: 5))
+
+        let thirdSelect = app.buttons["phonepad.tab.select.\(thirdSuffix)"]
+        tabStrip.swipeLeft()
+        XCTAssertTrue(waitForHittable(thirdSelect, timeout: 5))
+        XCTAssertEqual(thirdSelect.frame.height, 44, accuracy: 0.01)
+        XCTAssertEqual(thirdDrag.frame.height, 44, accuracy: 0.01)
+        XCTAssertFalse(thirdSelect.frame.intersects(thirdDrag.frame))
+        thirdSelect.tap()
+        XCTAssertTrue(waitForValue(editor, value: "Third Tab State", timeout: 5))
+    }
+
+    @MainActor
+    func testTabStripGrowsForAccessibilityContentSize() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launchArguments += [
+            "-UIPreferredContentSizeCategoryName",
+            UIContentSizeCategory.accessibilityExtraExtraExtraLarge.rawValue
+        ]
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let tab = tabItems(in: app).firstMatch
+        XCTAssertTrue(tab.waitForExistence(timeout: 2))
+        XCTAssertGreaterThan(tab.frame.height, 44)
+    }
+
+    @MainActor
+    func testTabStripKeepsStandardGeometryAtLargestStandardContentSize() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launchArguments += [
+            "-UIPreferredContentSizeCategoryName",
+            UIContentSizeCategory.extraExtraExtraLarge.rawValue
+        ]
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let tab = tabItems(in: app).firstMatch
+        XCTAssertTrue(tab.waitForExistence(timeout: 2))
+        XCTAssertEqual(tab.frame.height, 44, accuracy: 0.5)
+    }
+
+    @MainActor
     private func waitForCount(
         _ query: XCUIElementQuery,
         count: Int,
@@ -332,6 +496,43 @@ final class PhonePadLaunchUITests: XCTestCase {
         let predicate = NSPredicate(format: "value == %@", value)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    @MainActor
+    private func waitForHittable(
+        _ element: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let predicate = NSPredicate(format: "hittable == true")
+        let expectation = XCTNSPredicateExpectation(
+            predicate: predicate,
+            object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    @MainActor
+    private func tabItems(in app: XCUIApplication) -> XCUIElementQuery {
+        app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "phonepad.tab.item.")
+        )
+    }
+
+    @MainActor
+    private func waitForTabOrder(
+        _ query: XCUIElementQuery,
+        expectedIdentifiers: [String],
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let identifiers = query.allElementsBoundByIndex.map(\.identifier)
+            if identifiers == expectedIdentifiers {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        return false
     }
 
 }

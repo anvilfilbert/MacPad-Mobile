@@ -29,7 +29,7 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpen = await model.openDocument(selectedURL: sourceURL)
+        let didOpen = await model.openTestDocument(selectedURL: sourceURL)
         XCTAssertTrue(didOpen)
         let openedState = model.state
         let oversizedText = String(
@@ -47,6 +47,42 @@ final class PhonePadAppModelTests: XCTestCase {
             documentID: openedState.activeTab.document.id
         )
         XCTAssertNil(recovery)
+    }
+
+    func testOpenRejectsCommittedEditorTextModelDidNotAccept() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let sourceRootURL = try makeModelRecoveryRoot()
+        let sourceURL = sourceRootURL.appendingPathComponent(
+            "Open.txt",
+            isDirectory: false
+        )
+        try Data("External text\n".utf8).write(
+            to: sourceURL,
+            options: .withoutOverwriting
+        )
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: FileRecoveryStore(
+                rootURL: recoveryRootURL,
+                fileManager: .default
+            )
+        )
+        let initialState = model.state
+
+        let didOpen = await model.openDocument(
+            selectedURL: sourceURL,
+            after: CommittedEditorDocument(
+                documentID: initialState.activeTab.document.id,
+                text: "Rejected\0editor text"
+            )
+        )
+
+        XCTAssertFalse(didOpen)
+        XCTAssertEqual(model.state, initialState)
+        XCTAssertNotNil(model.fileSaveError)
     }
 
     func testRecoveryCatalogDoesNotRestorePreservedWorkAtLaunch() async throws {
@@ -136,7 +172,9 @@ final class PhonePadAppModelTests: XCTestCase {
         )
         await model.refreshRecoveryItems()
 
-        let didRecover = await model.recoverRecovery(documentID: preservedDocumentID)
+        let didRecover = await model.recoverTestRecovery(
+            documentID: preservedDocumentID
+        )
 
         XCTAssertTrue(didRecover)
         XCTAssertEqual(model.state.tabs.count, 2)
@@ -147,6 +185,97 @@ final class PhonePadAppModelTests: XCTestCase {
         XCTAssertTrue(model.recoveryItems.isEmpty)
         let retainedEnvelope = try await store.load(documentID: preservedDocumentID)
         XCTAssertEqual(retainedEnvelope, envelope)
+    }
+
+    func testRecoverRejectsCommittedEditorTextModelDidNotAccept() async throws {
+        let rootURL = try makeModelRecoveryRoot()
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        let preservedDocumentID = DocumentID(rawValue: UUID())
+        let envelope = RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: preservedDocumentID,
+            title: "Preserved",
+            text: "Preserved content",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_150)
+        )
+        try await store.save(envelope: envelope)
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store
+        )
+        await model.refreshRecoveryItems()
+        let initialState = model.state
+
+        let didRecover = await model.recoverRecovery(
+            documentID: preservedDocumentID,
+            after: CommittedEditorDocument(
+                documentID: initialState.activeTab.document.id,
+                text: "Rejected\0editor text"
+            )
+        )
+
+        XCTAssertFalse(didRecover)
+        XCTAssertEqual(model.state, initialState)
+        XCTAssertEqual(model.recoveryItems.map(\.documentID), [preservedDocumentID])
+        let retainedEnvelope = try await store.load(
+            documentID: preservedDocumentID
+        )
+        XCTAssertEqual(retainedEnvelope, envelope)
+        XCTAssertNotNil(model.recoveryCatalogError)
+    }
+
+    func testRecoverCheckpointFailureKeepsCurrentAndPreservedWork() async throws {
+        let rootURL = try makeModelRecoveryRoot()
+        let setupStore = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        let preservedDocumentID = DocumentID(rawValue: UUID())
+        let envelope = RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: preservedDocumentID,
+            title: "Preserved",
+            text: "Preserved content",
+            editedAt: Date(timeIntervalSince1970: 1_760_000_175)
+        )
+        try await setupStore.save(envelope: envelope)
+        let validationGate = CheckpointValidationGate()
+        let store = FileRecoveryStore(
+            rootURL: rootURL,
+            fileManager: .default,
+            postPromotionValidation: validationGate.validate
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: currentDocumentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store,
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        await model.refreshRecoveryItems()
+        model.editActiveDocument(text: "Current unsaved content")
+
+        let didRecover = await model.recoverRecovery(
+            documentID: preservedDocumentID,
+            after: CommittedEditorDocument(
+                documentID: currentDocumentID,
+                text: "Current unsaved content"
+            )
+        )
+
+        XCTAssertFalse(didRecover)
+        XCTAssertEqual(model.state.tabs.count, 1)
+        XCTAssertEqual(model.state.activeTab.document.id, currentDocumentID)
+        XCTAssertEqual(model.activeText, "Current unsaved content")
+        XCTAssertEqual(model.recoveryItems.map(\.documentID), [preservedDocumentID])
+        let retainedEnvelope = try await store.load(
+            documentID: preservedDocumentID
+        )
+        XCTAssertEqual(retainedEnvelope, envelope)
+        XCTAssertNotNil(model.recoveryCatalogError)
     }
 
     func testRecoverWaitsForCurrentCheckpointWithoutLosingEitherTab() async throws {
@@ -177,7 +306,9 @@ final class PhonePadAppModelTests: XCTestCase {
         await model.refreshRecoveryItems()
         model.editActiveDocument(text: "Current unsaved content")
 
-        let didRecover = await model.recoverRecovery(documentID: preservedDocumentID)
+        let didRecover = await model.recoverTestRecovery(
+            documentID: preservedDocumentID
+        )
 
         XCTAssertTrue(didRecover)
         XCTAssertEqual(model.state.tabs.count, 2)
@@ -190,6 +321,58 @@ final class PhonePadAppModelTests: XCTestCase {
         XCTAssertEqual(model.state.activeTab.document.id, preservedDocumentID)
         let currentEnvelope = try await store.load(documentID: currentDocumentID)
         XCTAssertEqual(currentEnvelope?.text, "Current unsaved content")
+    }
+
+    func testRecoverRejectsQueuedEditorCallbackWhileLoadingPreservedWork() async throws {
+        let rootURL = try makeModelRecoveryRoot()
+        let baseStore = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let preservedDocumentID = DocumentID(rawValue: UUID())
+        try await baseStore.save(
+            envelope: RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: preservedDocumentID,
+                title: "Preserved",
+                text: "Preserved content",
+                editedAt: Date(timeIntervalSince1970: 1_760_000_325)
+            )
+        )
+        let store = BlockingRecoveryLoadStore(
+            baseStore: baseStore,
+            blockedDocumentID: preservedDocumentID
+        )
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: currentDocumentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store
+        )
+        await model.refreshRecoveryItems()
+        let committedDocument = CommittedEditorDocument(
+            documentID: currentDocumentID,
+            text: ""
+        )
+        let recover = Task {
+            await model.recoverRecovery(
+                documentID: preservedDocumentID,
+                after: committedDocument
+            )
+        }
+        await store.waitUntilLoadEntered()
+        let stateBeforeCallback = model.state
+
+        let didEdit = model.editDocument(
+            documentID: currentDocumentID,
+            text: "Queued editor callback"
+        )
+
+        XCTAssertFalse(didEdit)
+        XCTAssertEqual(model.state, stateBeforeCallback)
+        await store.resumeLoad()
+        let didRecover = await recover.value
+        XCTAssertTrue(didRecover)
+        XCTAssertEqual(model.state.activeTab.document.id, preservedDocumentID)
     }
 
     func testDiscardRecoveryRemovesCatalogItemOnlyAfterTerminalStoreTransition() async throws {
@@ -526,7 +709,7 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpen = await model.openDocument(selectedURL: sourceURL)
+        let didOpen = await model.openTestDocument(selectedURL: sourceURL)
         XCTAssertTrue(didOpen)
         model.editActiveDocument(text: "Selected\nencoding\n")
         let preparation = try model.prepareDocumentSaveAs(
@@ -968,8 +1151,8 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointMaximumInterval: .milliseconds(100)
         )
 
-        let firstOpen = await model.openDocument(selectedURL: sourceURL)
-        let duplicateOpen = await model.openDocument(selectedURL: sourceURL)
+        let firstOpen = await model.openTestDocument(selectedURL: sourceURL)
+        let duplicateOpen = await model.openTestDocument(selectedURL: sourceURL)
 
         XCTAssertTrue(firstOpen)
         XCTAssertTrue(duplicateOpen)
@@ -1031,7 +1214,7 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointQuietPeriod: .seconds(30),
             checkpointMaximumInterval: .seconds(30)
         )
-        let didOpen = await model.openDocument(selectedURL: sourceURL)
+        let didOpen = await model.openTestDocument(selectedURL: sourceURL)
         XCTAssertTrue(didOpen)
         model.editActiveDocument(text: "Unsaved PhonePad text\n")
         let externalBytes = Data("External text\n".utf8)
@@ -1081,7 +1264,7 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpen = await model.openDocument(selectedURL: sourceURL)
+        let didOpen = await model.openTestDocument(selectedURL: sourceURL)
         XCTAssertTrue(didOpen)
         model.editActiveDocument(text: "Café first edit\n")
         try await Task.sleep(for: .milliseconds(250))
@@ -1119,6 +1302,30 @@ final class PhonePadAppModelTests: XCTestCase {
             try FileManager.default.removeItem(at: rootURL)
         }
         return rootURL
+    }
+}
+
+private extension PhonePadAppModel {
+    func openTestDocument(selectedURL: URL) async -> Bool {
+        let document = state.activeTab.document
+        return await openDocument(
+            selectedURL: selectedURL,
+            after: CommittedEditorDocument(
+                documentID: document.id,
+                text: document.text
+            )
+        )
+    }
+
+    func recoverTestRecovery(documentID: DocumentID) async -> Bool {
+        let document = state.activeTab.document
+        return await recoverRecovery(
+            documentID: documentID,
+            after: CommittedEditorDocument(
+                documentID: document.id,
+                text: document.text
+            )
+        )
     }
 }
 
@@ -1162,6 +1369,98 @@ private final class BlockingBookmarkGate: @unchecked Sendable {
 
     func resume() {
         release.signal()
+    }
+}
+
+private struct BlockingRecoveryLoadStore: RecoveryStoring {
+    private let baseStore: FileRecoveryStore
+    private let blockedDocumentID: DocumentID
+    private let gate: BlockingRecoveryLoadGate
+
+    init(baseStore: FileRecoveryStore, blockedDocumentID: DocumentID) {
+        self.baseStore = baseStore
+        self.blockedDocumentID = blockedDocumentID
+        gate = BlockingRecoveryLoadGate()
+    }
+
+    func save(envelope: RecoveryEnvelope) async throws {
+        try await baseStore.save(envelope: envelope)
+    }
+
+    func load(documentID: DocumentID) async throws -> RecoveryEnvelope? {
+        if documentID == blockedDocumentID {
+            await gate.block()
+        }
+        return try await baseStore.load(documentID: documentID)
+    }
+
+    func verifyCheckpoint(
+        documentID: DocumentID
+    ) async throws -> RecoveryCheckpointVerification {
+        try await baseStore.verifyCheckpoint(documentID: documentID)
+    }
+
+    func recoveryItems() async throws -> [RecoveryItemSummary] {
+        try await baseStore.recoveryItems()
+    }
+
+    func recoveryFileCollisionClaims(
+        excludingDocumentID: DocumentID
+    ) async throws -> [FileCollisionClaim] {
+        try await baseStore.recoveryFileCollisionClaims(
+            excludingDocumentID: excludingDocumentID
+        )
+    }
+
+    func discardRecovery(
+        documentID: DocumentID
+    ) async throws -> RecoveryTerminalOutcome {
+        try await baseStore.discardRecovery(documentID: documentID)
+    }
+
+    func completeRecoveryAfterSave(
+        documentID: DocumentID
+    ) async throws -> RecoveryTerminalOutcome {
+        try await baseStore.completeRecoveryAfterSave(documentID: documentID)
+    }
+
+    func waitUntilLoadEntered() async {
+        await gate.waitUntilEntered()
+    }
+
+    func resumeLoad() async {
+        await gate.resume()
+    }
+}
+
+private actor BlockingRecoveryLoadGate {
+    private var didEnter: Bool = false
+    private var entryContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func block() async {
+        didEnter = true
+        entryContinuation?.resume()
+        entryContinuation = nil
+        await withCheckedContinuation { continuation in
+            precondition(releaseContinuation == nil)
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        if didEnter {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            precondition(entryContinuation == nil)
+            entryContinuation = continuation
+        }
+    }
+
+    func resume() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 

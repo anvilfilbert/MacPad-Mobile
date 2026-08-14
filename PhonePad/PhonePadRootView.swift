@@ -20,6 +20,17 @@ private enum PhonePadSaveAsPresentationError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadOpenPresentationError: Error, LocalizedError {
+    case committedDocumentMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .committedDocumentMissing:
+            return "Editor content is no longer available for Open. Close the picker and try Open again."
+        }
+    }
+}
+
 private enum PhonePadFileAction {
     case open
     case save
@@ -66,6 +77,7 @@ struct PhonePadRootView: View {
     @State private var saveAsWasPresentedFromFileConflict: Bool
     @State private var filePickerIsPresented: Bool
     @State private var fileAction: PhonePadFileAction?
+    @State private var openCommittedDocument: CommittedEditorDocument?
 
     init(model: PhonePadAppModel) {
         self.model = model
@@ -81,32 +93,66 @@ struct PhonePadRootView: View {
         saveAsWasPresentedFromFileConflict = false
         filePickerIsPresented = false
         fileAction = nil
+        openCommittedDocument = nil
     }
 
     var body: some View {
+        let activeDocumentID = model.state.activeTab.document.id
         NavigationStack {
             VStack(spacing: 0) {
-                tabStrip
+                PhonePadTabStrip(
+                    tabs: model.state.tabs,
+                    activeTabID: model.state.activeTabID,
+                    interactionDisabled: model.fileMutationDisabled,
+                    onSelect: selectTab,
+                    onMove: moveTab,
+                    onMoveError: model.reportTabTransitionError
+                )
                 Divider()
                 PhonePadTextEditor(
+                    documentID: activeDocumentID,
                     text: Binding(
                         get: { model.activeText },
-                        set: { model.editActiveDocument(text: $0) }
+                        set: {
+                            _ = model.editDocument(
+                                documentID: activeDocumentID,
+                                text: $0
+                            )
+                        }
                     ),
                     isEditable: !model.editorMutationDisabled,
                     transitionController: editorTransitionController
                 )
-                .disabled(model.fileMutationDisabled)
+                .disabled(model.editorInteractionDisabled)
             }
             .navigationTitle(model.state.activeTab.document.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: createTab) {
+                        Image(systemName: "plus.rectangle.on.rectangle")
+                    }
+                    .disabled(model.fileMutationDisabled)
+                    .accessibilityLabel("New Tab")
+                    .accessibilityIdentifier("phonepad.toolbar.new-tab")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     actionMenu
                 }
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("phonepad.root")
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let tabTransitionError = model.tabTransitionError {
+                Text(tabTransitionError)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.red)
+                    .accessibilityIdentifier("phonepad.tab.error")
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let recoveryError = model.recoveryError {
@@ -436,11 +482,50 @@ struct PhonePadRootView: View {
         .background(color)
     }
 
+    private func createTab() {
+        model.clearTabTransitionFeedback()
+        Task { @MainActor in
+            do {
+                let committedDocument = try editorTransitionController
+                    .commitMarkedText()
+                _ = await model.createTab(after: committedDocument)
+            } catch {
+                model.reportTabTransitionError(error)
+            }
+        }
+    }
+
+    private func selectTab(_ tabID: TabID) {
+        guard tabID != model.state.activeTabID else {
+            return
+        }
+        model.clearTabTransitionFeedback()
+        Task { @MainActor in
+            do {
+                let committedDocument = try editorTransitionController
+                    .commitMarkedText()
+                _ = await model.selectTab(tabID, after: committedDocument)
+            } catch {
+                model.reportTabTransitionError(error)
+            }
+        }
+    }
+
+    private func moveTab(
+        _ tabID: TabID,
+        to placement: PhonePadCore.TabPlacement
+    ) {
+        model.clearTabTransitionFeedback()
+        Task { @MainActor in
+            _ = await model.moveTab(tabID, to: placement)
+        }
+    }
+
     private func saveActiveDocument() {
         model.clearFileSaveFeedback()
         fileAction = .save
         do {
-            try editorTransitionController.commitMarkedText()
+            _ = try editorTransitionController.commitMarkedText()
         } catch {
             model.reportFileSaveTransitionError(error)
             return
@@ -463,7 +548,7 @@ struct PhonePadRootView: View {
         model.clearFileSaveFeedback()
         fileAction = .save
         do {
-            try editorTransitionController.commitMarkedText()
+            _ = try editorTransitionController.commitMarkedText()
         } catch {
             model.reportFileSaveTransitionError(error)
             return
@@ -695,7 +780,7 @@ struct PhonePadRootView: View {
 
     private func reloadCurrentFileFromConflict() {
         do {
-            try editorTransitionController.commitMarkedText()
+            _ = try editorTransitionController.commitMarkedText()
         } catch {
             model.reportFileConflictTransitionError(error)
             return
@@ -707,7 +792,7 @@ struct PhonePadRootView: View {
 
     private func presentSaveAsFromFileConflict() {
         do {
-            try editorTransitionController.commitMarkedText()
+            _ = try editorTransitionController.commitMarkedText()
         } catch {
             model.reportFileConflictTransitionError(error)
             return
@@ -771,7 +856,8 @@ struct PhonePadRootView: View {
         model.clearFileSaveFeedback()
         fileAction = .open
         do {
-            try editorTransitionController.commitMarkedText()
+            openCommittedDocument = try editorTransitionController
+                .commitMarkedText()
         } catch {
             model.reportFileSaveTransitionError(error)
             return
@@ -782,8 +868,18 @@ struct PhonePadRootView: View {
     private func selectOpenFile(_ selectedURL: URL) {
         filePickerIsPresented = false
         fileAction = .open
+        guard let committedDocument = openCommittedDocument else {
+            model.reportFileSaveTransitionError(
+                PhonePadOpenPresentationError.committedDocumentMissing
+            )
+            return
+        }
+        openCommittedDocument = nil
         Task { @MainActor in
-            let opened = await model.openDocument(selectedURL: selectedURL)
+            let opened = await model.openDocument(
+                selectedURL: selectedURL,
+                after: committedDocument
+            )
             if opened, model.fileSaveNotice == nil {
                 fileAction = nil
             }
@@ -793,11 +889,13 @@ struct PhonePadRootView: View {
     private func cancelFilePicker() {
         filePickerIsPresented = false
         fileAction = nil
+        openCommittedDocument = nil
     }
 
     private func failFilePicker(_ error: Error) {
         filePickerIsPresented = false
         fileAction = .open
+        openCommittedDocument = nil
         model.reportFileSaveTransitionError(error)
     }
 
@@ -875,14 +973,17 @@ struct PhonePadRootView: View {
                 if item.status == .recoverable {
                     Button("Recover") {
                         Task { @MainActor in
+                            let committedDocument: CommittedEditorDocument
                             do {
-                                try editorTransitionController.commitMarkedText()
+                                committedDocument = try editorTransitionController
+                                    .commitMarkedText()
                             } catch {
                                 model.reportRecoveryTransitionError(error)
                                 return
                             }
                             let recovered = await model.recoverRecovery(
-                                documentID: item.documentID
+                                documentID: item.documentID,
+                                after: committedDocument
                             )
                             if recovered {
                                 recoveryIsPresented = false
@@ -999,31 +1100,6 @@ struct PhonePadRootView: View {
         .presentationDetents([.medium])
     }
 
-    private var tabStrip: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 6) {
-                ForEach(model.state.tabs, id: \.id) { tab in
-                    Text(tab.document.title)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                        .padding(.horizontal, 12)
-                        .frame(height: 30)
-                        .background(Color.accentColor.opacity(0.16), in: Capsule())
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityIdentifier("phonepad.tab.item")
-                        .accessibilityLabel(tab.document.title)
-                        .accessibilityValue(
-                            recoveryStateAccessibilityValue(tab.document.recoveryState)
-                        )
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(minHeight: 44)
-        }
-        .scrollIndicators(.hidden)
-        .accessibilityIdentifier("phonepad.tab-strip")
-    }
-
     private func recoveryLastEditedText(_ lastEdited: RecoveryItemLastEdited) -> String {
         switch lastEdited {
         case let .available(date):
@@ -1070,19 +1146,6 @@ struct PhonePadRootView: View {
             return "Document Recovery needs attention"
         }
         return "No preserved work"
-    }
-
-    private func recoveryStateAccessibilityValue(
-        _ recoveryState: DocumentRecoveryState
-    ) -> String {
-        switch recoveryState {
-        case .clean:
-            return "Clean"
-        case .checkpointPending:
-            return "Protecting edits"
-        case .protectedUnsaved:
-            return "Edits protected"
-        }
     }
 
     private func fileConflictDescription(_ conflict: FileConflict) -> String {

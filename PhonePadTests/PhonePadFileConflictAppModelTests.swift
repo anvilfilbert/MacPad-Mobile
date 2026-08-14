@@ -8,7 +8,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
     func testSaveConflictIsStickyAndCancelMutatesNoDocumentOrRecovery() async throws {
         let fixture = try makeConflictModelFixture()
         let model = makeConflictModel(fixture: fixture)
-        let didOpen = await model.openDocument(selectedURL: fixture.fileURL)
+        let didOpen = await model.openTestDocument(selectedURL: fixture.fileURL)
         XCTAssertTrue(didOpen)
         let documentID = model.state.activeTab.document.id
         model.editActiveDocument(text: "Protected PhonePad edit\n")
@@ -104,11 +104,11 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpenOriginal = await model.openDocument(selectedURL: originalURL)
+        let didOpenOriginal = await model.openTestDocument(selectedURL: originalURL)
         XCTAssertTrue(didOpenOriginal)
         let documentID = model.state.activeTab.document.id
 
-        let didOpenAlternate = await model.openDocument(selectedURL: alternateURL)
+        let didOpenAlternate = await model.openTestDocument(selectedURL: alternateURL)
         XCTAssertTrue(didOpenAlternate)
 
         XCTAssertEqual(model.state.tabs.count, 1)
@@ -189,10 +189,10 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpenOriginal = await model.openDocument(selectedURL: originalURL)
+        let didOpenOriginal = await model.openTestDocument(selectedURL: originalURL)
         XCTAssertTrue(didOpenOriginal)
 
-        let didOpenAlternate = await model.openDocument(selectedURL: alternateURL)
+        let didOpenAlternate = await model.openTestDocument(selectedURL: alternateURL)
         XCTAssertTrue(didOpenAlternate)
         model.editActiveDocument(text: "Immediate Save through alternate locator\n")
         let didSave = await model.saveActiveDocument()
@@ -464,7 +464,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpen = await model.openDocument(selectedURL: fileURL)
+        let didOpen = await model.openTestDocument(selectedURL: fileURL)
         XCTAssertTrue(didOpen)
         let documentID = model.state.activeTab.document.id
         model.editActiveDocument(text: "Save As local edit\n")
@@ -535,7 +535,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpen = await model.openDocument(selectedURL: fileURL)
+        let didOpen = await model.openTestDocument(selectedURL: fileURL)
         XCTAssertTrue(didOpen)
         let documentID = model.state.activeTab.document.id
         model.editActiveDocument(text: "Checkpoint in flight\n")
@@ -617,7 +617,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        let didOpen = await model.openDocument(selectedURL: fileURL)
+        let didOpen = await model.openTestDocument(selectedURL: fileURL)
         XCTAssertTrue(didOpen)
         let documentID = model.state.activeTab.document.id
         let binding = try XCTUnwrap(model.state.activeTab.document.fileBinding)
@@ -743,7 +743,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        guard await model.openDocument(selectedURL: fileURL) else {
+        guard await model.openTestDocument(selectedURL: fileURL) else {
             throw ConflictAppModelFixtureError.fileOpenFailed
         }
         let documentID = model.state.activeTab.document.id
@@ -820,7 +820,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        guard await model.openDocument(selectedURL: fileURL) else {
+        guard await model.openTestDocument(selectedURL: fileURL) else {
             throw ConflictAppModelFixtureError.fileOpenFailed
         }
         let documentID = model.state.activeTab.document.id
@@ -901,7 +901,7 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             checkpointQuietPeriod: .milliseconds(20),
             checkpointMaximumInterval: .milliseconds(100)
         )
-        guard await model.openDocument(selectedURL: fileURL) else {
+        guard await model.openTestDocument(selectedURL: fileURL) else {
             throw ConflictAppModelFixtureError.fileOpenFailed
         }
         let documentID = model.state.activeTab.document.id
@@ -961,6 +961,19 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             try FileManager.default.removeItem(at: rootURL)
         }
         return rootURL
+    }
+}
+
+private extension PhonePadAppModel {
+    func openTestDocument(selectedURL: URL) async -> Bool {
+        let document = state.activeTab.document
+        return await openDocument(
+            selectedURL: selectedURL,
+            after: CommittedEditorDocument(
+                documentID: document.id,
+                text: document.text
+            )
+        )
     }
 }
 

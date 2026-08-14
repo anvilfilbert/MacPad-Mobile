@@ -122,14 +122,21 @@ private func prepareFileConflictFixture(
         attributes: nil
     )
     let fileURL = fixtureDirectoryURL.appendingPathComponent(
-        "Conflict.txt",
+        String(repeating: "Long File Name ", count: 12) + "Conflict.txt",
         isDirectory: false
     )
     try Data("Original conflict baseline\n".utf8).write(
         to: fileURL,
         options: .withoutOverwriting
     )
-    guard await model.openDocument(selectedURL: fileURL) else {
+    let activeDocument = model.state.activeTab.document
+    guard await model.openDocument(
+        selectedURL: fileURL,
+        after: CommittedEditorDocument(
+            documentID: activeDocument.id,
+            text: activeDocument.text
+        )
+    ) else {
         throw PhonePadUITestFixtureError.fileOpenFailed
     }
 

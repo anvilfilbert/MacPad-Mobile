@@ -16,6 +16,11 @@ public struct TabID: RawRepresentable, Codable, Hashable, Sendable {
     }
 }
 
+public enum TabPlacement: Equatable, Sendable {
+    case before(TabID)
+    case end
+}
+
 public enum DocumentRecoveryState: String, Codable, Equatable, Sendable {
     case clean
     case checkpointPending
@@ -135,16 +140,39 @@ public struct PhonePadState: Equatable, Sendable {
     }
 
     init(tabs: [PhonePadTab], activeTabID: TabID) {
-        precondition(
-            tabs.contains(where: { $0.id == activeTabID }),
-            "PhonePadState requires its active Tab to exist."
-        )
+        if let error = phonePadStateValidationError(
+            tabs: tabs,
+            activeTabID: activeTabID
+        ) {
+            preconditionFailure(
+                "PhonePadState invariant violated: \(error.localizedDescription)"
+            )
+        }
+        self.tabs = tabs
+        self.activeTabID = activeTabID
+    }
+
+    init(
+        validatingTabs tabs: [PhonePadTab],
+        activeTabID: TabID
+    ) throws {
+        if let error = phonePadStateValidationError(
+            tabs: tabs,
+            activeTabID: activeTabID
+        ) {
+            throw error
+        }
         self.tabs = tabs
         self.activeTabID = activeTabID
     }
 }
 
 public enum PhonePadStateError: Error, Equatable, Sendable {
+    case emptyTabWorkspace
+    case duplicateTabID(TabID)
+    case duplicateDocumentID(DocumentID)
+    case tabMissing(TabID)
+    case tabPlacementAnchorMissing(TabID)
     case activeTabMissing(TabID)
     case documentMissing(DocumentID)
     case documentIsNotBound(DocumentID)
@@ -162,6 +190,16 @@ public enum PhonePadStateError: Error, Equatable, Sendable {
 extension PhonePadStateError: LocalizedError {
     public var errorDescription: String? {
         switch self {
+        case .emptyTabWorkspace:
+            return "Tab workspace is empty. Keep at least one Tab open."
+        case let .duplicateTabID(tabID):
+            return "Tab identifier \(tabID.rawValue.uuidString) already belongs to an open Tab. Generate a unique Tab identifier and try again."
+        case let .duplicateDocumentID(documentID):
+            return "Document identifier \(documentID.rawValue.uuidString) already belongs to an open Document. Generate a unique Document identifier and try again."
+        case let .tabMissing(tabID):
+            return "Tab \(tabID.rawValue.uuidString) no longer exists. Refresh the Tab workspace and try again."
+        case let .tabPlacementAnchorMissing(tabID):
+            return "Tab reorder destination \(tabID.rawValue.uuidString) no longer exists. Refresh the Tab workspace and try again."
         case .activeTabMissing:
             return "Active Tab no longer exists. Select an available Tab and try again."
         case .documentMissing:
@@ -176,6 +214,52 @@ extension PhonePadStateError: LocalizedError {
             return "Observed File location belongs to another open Document. Switch to that Tab; no File binding changed."
         }
     }
+}
+
+private func phonePadStateValidationError(
+    tabs: [PhonePadTab],
+    activeTabID: TabID
+) -> PhonePadStateError? {
+    guard !tabs.isEmpty else {
+        return .emptyTabWorkspace
+    }
+    var tabIDs = Set<TabID>()
+    var documentIDs = Set<DocumentID>()
+    var boundIdentities: [FileIdentity: DocumentID] = [:]
+    var boundLocators: [URL: DocumentID] = [:]
+    for tab in tabs {
+        guard tabIDs.insert(tab.id).inserted else {
+            return .duplicateTabID(tab.id)
+        }
+        guard documentIDs.insert(tab.document.id).inserted else {
+            return .duplicateDocumentID(tab.document.id)
+        }
+        guard let binding = tab.document.fileBinding else {
+            continue
+        }
+        if let identity = binding.identity,
+           let conflictingDocumentID = boundIdentities[identity] {
+            return .fileBindingIdentityCollision(
+                documentID: tab.document.id,
+                conflictingDocumentID: conflictingDocumentID
+            )
+        }
+        if let identity = binding.identity {
+            boundIdentities[identity] = tab.document.id
+        }
+        let standardizedLocator = binding.locatorURL.standardizedFileURL
+        if let conflictingDocumentID = boundLocators[standardizedLocator] {
+            return .fileBindingLocatorCollision(
+                documentID: tab.document.id,
+                conflictingDocumentID: conflictingDocumentID
+            )
+        }
+        boundLocators[standardizedLocator] = tab.document.id
+    }
+    guard tabIDs.contains(activeTabID) else {
+        return .activeTabMissing(activeTabID)
+    }
+    return nil
 }
 
 public enum SavedDocumentTransitionError: Error, Equatable, Sendable {
@@ -223,6 +307,88 @@ public func makeInitialPhonePadState(
     )
     let tab = PhonePadTab(id: tabID, document: document)
     return PhonePadState(tabs: [tab], activeTabID: tabID)
+}
+
+public func createUntitledTab(
+    state: PhonePadState,
+    documentID: DocumentID,
+    tabID: TabID
+) throws -> PhonePadState {
+    guard !state.tabs.contains(where: { $0.id == tabID }) else {
+        throw PhonePadStateError.duplicateTabID(tabID)
+    }
+    guard !state.tabs.contains(where: { $0.document.id == documentID }) else {
+        throw PhonePadStateError.duplicateDocumentID(documentID)
+    }
+    let document = PhonePadDocument(
+        id: documentID,
+        title: nextUntitledTitle(tabs: state.tabs),
+        text: "",
+        isUnsaved: false,
+        recoveryState: .clean
+    )
+    let tab = PhonePadTab(id: tabID, document: document)
+    return PhonePadState(
+        tabs: state.tabs + [tab],
+        activeTabID: tab.id
+    )
+}
+
+private func nextUntitledTitle(tabs: [PhonePadTab]) -> String {
+    let existingTitles = Set(tabs.map(\.document.title))
+    guard existingTitles.contains("Untitled") else {
+        return "Untitled"
+    }
+    var suffix = 2
+    while existingTitles.contains("Untitled \(suffix)") {
+        suffix += 1
+    }
+    return "Untitled \(suffix)"
+}
+
+public func selectTab(
+    state: PhonePadState,
+    tabID: TabID
+) throws -> PhonePadState {
+    guard state.tabs.contains(where: { $0.id == tabID }) else {
+        throw PhonePadStateError.tabMissing(tabID)
+    }
+    return PhonePadState(tabs: state.tabs, activeTabID: tabID)
+}
+
+public func moveTab(
+    state: PhonePadState,
+    tabID: TabID,
+    placement: TabPlacement
+) throws -> PhonePadState {
+    guard let sourceIndex = state.tabs.firstIndex(where: {
+        $0.id == tabID
+    }) else {
+        throw PhonePadStateError.tabMissing(tabID)
+    }
+    if case let .before(anchorTabID) = placement {
+        guard state.tabs.contains(where: { $0.id == anchorTabID }) else {
+            throw PhonePadStateError.tabPlacementAnchorMissing(anchorTabID)
+        }
+        guard anchorTabID != tabID else {
+            return state
+        }
+    }
+
+    var tabs = state.tabs
+    let movedTab = tabs.remove(at: sourceIndex)
+    switch placement {
+    case let .before(anchorTabID):
+        guard let destinationIndex = tabs.firstIndex(where: {
+            $0.id == anchorTabID
+        }) else {
+            throw PhonePadStateError.tabPlacementAnchorMissing(anchorTabID)
+        }
+        tabs.insert(movedTab, at: destinationIndex)
+    case .end:
+        tabs.append(movedTab)
+    }
+    return PhonePadState(tabs: tabs, activeTabID: state.activeTabID)
 }
 
 public func recoverDocument(

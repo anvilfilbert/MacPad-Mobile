@@ -34,7 +34,6 @@ private enum PendingFileSaveCleanup {
 
 private enum PhonePadRecoveryActionError: Error, LocalizedError {
     case actionAlreadyInProgress
-    case checkpointMustFinishBeforeRecovering
     case checkpointHeldForFileConflictReload
     case recoveryItemCannotBeRecovered
     case recoveryItemMissing
@@ -43,8 +42,6 @@ private enum PhonePadRecoveryActionError: Error, LocalizedError {
         switch self {
         case .actionAlreadyInProgress:
             "Another recovery action is still running. Wait for it to finish and retry."
-        case .checkpointMustFinishBeforeRecovering:
-            "Current edits could not be protected. Resolve the recovery error before opening preserved work."
         case .checkpointHeldForFileConflictReload:
             "Current edits remain locked until Reload Current finishes. Retry Reload Current or retry recovery before editing."
         case .recoveryItemCannotBeRecovered:
@@ -78,6 +75,29 @@ private enum PhonePadFileSaveActionError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadTabTransitionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+    case committedDocumentIsNotActive
+    case committedTextWasRejected
+    case checkpointMustFinishBeforeTransition
+    case activeDocumentChangedDuringTransition
+
+    var errorDescription: String? {
+        switch self {
+        case .actionAlreadyInProgress:
+            "Another File, recovery, or Tab action is still running. Wait for it to finish and retry."
+        case .committedDocumentIsNotActive:
+            "Editor content belongs to a different Document. Keep the current Tab active and retry."
+        case .committedTextWasRejected:
+            "Editor content did not pass Document validation. Keep the current Tab active and correct the content before retrying."
+        case .checkpointMustFinishBeforeTransition:
+            "Current edits could not be protected. Resolve the recovery error before changing Tabs."
+        case .activeDocumentChangedDuringTransition:
+            "Current Document changed while its recovery checkpoint was being protected. Keep the current Tab active and retry."
+        }
+    }
+}
+
 @MainActor
 final class PhonePadAppModel: ObservableObject {
     @Published private(set) var state: PhonePadState
@@ -92,8 +112,10 @@ final class PhonePadAppModel: ObservableObject {
     @Published private(set) var pendingSaveAsReplacement: PreparedSaveAsPreflight?
     @Published private(set) var fileConflictResolutionIsPresented: Bool
     @Published private(set) var fileConflictError: String?
+    @Published private(set) var tabTransitionError: String?
+    @Published private(set) var tabTransitionInProgress: Bool
 
-    private let recoveryStore: FileRecoveryStore
+    private let recoveryStore: any RecoveryStoring
     private let fileAccessConnector: FileAccessConnector
     private let checkpointQuietPeriod: Duration
     private let checkpointMaximumInterval: Duration
@@ -107,10 +129,11 @@ final class PhonePadAppModel: ObservableObject {
     private var presenterLifecycleGeneration: UInt64
     private var presenterRefreshPending: Bool
     private var editGeneration: UInt64
+    private var activeDocumentTransitionInProgress: Bool
 
     init(
         state: PhonePadState,
-        recoveryStore: FileRecoveryStore,
+        recoveryStore: any RecoveryStoring,
         fileAccessConnector: FileAccessConnector,
         checkpointQuietPeriod: Duration,
         checkpointMaximumInterval: Duration
@@ -134,6 +157,8 @@ final class PhonePadAppModel: ObservableObject {
         pendingSaveAsReplacement = nil
         fileConflictResolutionIsPresented = false
         fileConflictError = nil
+        tabTransitionError = nil
+        tabTransitionInProgress = false
         pendingCheckpoint = nil
         failedCheckpoint = nil
         pendingFileSaveCleanup = nil
@@ -142,6 +167,7 @@ final class PhonePadAppModel: ObservableObject {
         presenterLifecycleGeneration = 0
         presenterRefreshPending = false
         editGeneration = 0
+        activeDocumentTransitionInProgress = false
         startPresentationHintTask()
     }
 
@@ -151,7 +177,7 @@ final class PhonePadAppModel: ObservableObject {
 
     convenience init(
         state: PhonePadState,
-        recoveryStore: FileRecoveryStore,
+        recoveryStore: any RecoveryStoring,
         checkpointQuietPeriod: Duration,
         checkpointMaximumInterval: Duration
     ) {
@@ -166,7 +192,7 @@ final class PhonePadAppModel: ObservableObject {
 
     convenience init(
         state: PhonePadState,
-        recoveryStore: FileRecoveryStore
+        recoveryStore: any RecoveryStoring
     ) {
         self.init(
             state: state,
@@ -198,13 +224,134 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     var fileMutationDisabled: Bool {
+        editorInteractionDisabled
+            || tabTransitionInProgress
+    }
+
+    var editorInteractionDisabled: Bool {
         fileSaveInProgress
             || fileSaveCleanupRequired
             || pendingSaveAsReplacement != nil
+            || activeRecoveryAction != nil
+            || activeDocumentTransitionInProgress
     }
 
     var editorMutationDisabled: Bool {
-        fileMutationDisabled || failedCheckpoint != nil
+        editorInteractionDisabled || failedCheckpoint != nil
+    }
+
+    func clearTabTransitionFeedback() {
+        tabTransitionError = nil
+    }
+
+    func reportTabTransitionError(_ error: Error) {
+        tabTransitionError = error.localizedDescription
+    }
+
+    @discardableResult
+    func createTab(
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard beginActiveDocumentTransition() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        let documentID = DocumentID(rawValue: UUID())
+        let tabID = TabID(rawValue: UUID())
+        do {
+            try validateCommittedDocument(committedDocument)
+            _ = try PhonePadCore.createUntitledTab(
+                state: state,
+                documentID: documentID,
+                tabID: tabID
+            )
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
+            state = try PhonePadCore.createUntitledTab(
+                state: state,
+                documentID: documentID,
+                tabID: tabID
+            )
+            tabTransitionError = nil
+            presentActiveFileConflictIfNeeded()
+            return true
+        } catch {
+            tabTransitionError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func selectTab(
+        _ tabID: TabID,
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard beginActiveDocumentTransition() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        do {
+            try validateCommittedDocument(committedDocument)
+            _ = try PhonePadCore.selectTab(state: state, tabID: tabID)
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
+            state = try PhonePadCore.selectTab(state: state, tabID: tabID)
+            tabTransitionError = nil
+            presentActiveFileConflictIfNeeded()
+            return true
+        } catch {
+            tabTransitionError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func moveTab(
+        _ tabID: TabID,
+        to placement: PhonePadCore.TabPlacement
+    ) async -> Bool {
+        guard beginTabReorder() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        let activeDocumentID = state.activeTab.document.id
+        let activeDocumentText = state.activeTab.document.text
+        do {
+            _ = try PhonePadCore.moveTab(
+                state: state,
+                tabID: tabID,
+                placement: placement
+            )
+            guard await retryCurrentCheckpointIfNeeded(),
+                  pendingCheckpoint == nil,
+                  failedCheckpoint == nil,
+                  state.activeTab.document.recoveryState != .checkpointPending else {
+                throw PhonePadTabTransitionError
+                    .checkpointMustFinishBeforeTransition
+            }
+            guard state.activeTab.document.id == activeDocumentID,
+                  state.activeTab.document.text == activeDocumentText else {
+                throw PhonePadTabTransitionError
+                    .activeDocumentChangedDuringTransition
+            }
+            state = try PhonePadCore.moveTab(
+                state: state,
+                tabID: tabID,
+                placement: placement
+            )
+            tabTransitionError = nil
+            return true
+        } catch {
+            tabTransitionError = error.localizedDescription
+            return false
+        }
     }
 
     func clearFileSaveFeedback() {
@@ -221,7 +368,16 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     @discardableResult
-    func openDocument(selectedURL: URL) async -> Bool {
+    func openDocument(
+        selectedURL: URL,
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard !fileSaveCleanupRequired else {
             fileSaveError = PhonePadFileSaveActionError
                 .cleanupRequired
@@ -240,11 +396,12 @@ final class PhonePadAppModel: ObservableObject {
         fileSaveNotice = nil
         defer { finishFileMutation() }
 
-        guard await currentDocumentIsReadyForFileTransition() else {
-            return false
-        }
-
         do {
+            try validateCommittedDocument(committedDocument)
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
             let documentID = DocumentID(rawValue: UUID())
             let snapshot = try await fileAccessConnector.openTextFile(
                 at: selectedURL,
@@ -301,6 +458,9 @@ final class PhonePadAppModel: ObservableObject {
         fileName: String,
         encoding: TextFileEncoding
     ) throws -> PreparedSaveAs {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            throw PhonePadFileSaveActionError.actionAlreadyInProgress
+        }
         guard !fileSaveCleanupRequired else {
             throw PhonePadFileSaveActionError.cleanupRequired
         }
@@ -321,6 +481,12 @@ final class PhonePadAppModel: ObservableObject {
         preparation: PreparedSaveAs,
         selectedDirectoryURL: URL
     ) async -> PreparedSaveAsPreflight? {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return nil
+        }
         guard !fileSaveCleanupRequired else {
             fileSaveError = PhonePadFileSaveActionError
                 .cleanupRequired
@@ -366,6 +532,12 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     func presentFileConflictResolution() {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileConflictError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
         guard state.activeTab.document.fileConflict != nil else {
             return
         }
@@ -380,6 +552,12 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func beginSaveAsFromFileConflict() -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileConflictError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard state.activeTab.document.fileConflict != nil else {
             fileConflictError = FileConflictWorkflowError
                 .fileConflictRequired(state.activeTab.document.id)
@@ -397,6 +575,12 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func discardEditsAndReloadCurrentFile() async -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileConflictError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard !fileSaveCleanupRequired else {
             fileConflictError = PhonePadFileSaveActionError
                 .cleanupRequired
@@ -457,6 +641,8 @@ final class PhonePadAppModel: ObservableObject {
             return
         }
         guard !fileSaveInProgress,
+              !tabTransitionInProgress,
+              activeRecoveryAction == nil,
               !fileSaveCleanupRequired else {
             presenterRefreshPending = true
             return
@@ -480,6 +666,8 @@ final class PhonePadAppModel: ObservableObject {
                 return
             }
             guard !fileSaveInProgress,
+                  !tabTransitionInProgress,
+                  activeRecoveryAction == nil,
                   !fileSaveCleanupRequired else {
                 presenterRefreshPending = true
                 return
@@ -520,7 +708,7 @@ final class PhonePadAppModel: ObservableObject {
               !presentersShouldBeActive else {
             return
         }
-        guard !fileSaveInProgress else {
+        guard !fileSaveInProgress, !tabTransitionInProgress else {
             return
         }
         _ = await retryCurrentCheckpointIfNeeded()
@@ -534,6 +722,12 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     func retryActiveFileReconciliation() async {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileConflictError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
         fileConflictError = nil
         await sceneBecameActive()
     }
@@ -544,6 +738,8 @@ final class PhonePadAppModel: ObservableObject {
             return
         }
         guard !fileSaveInProgress,
+              !tabTransitionInProgress,
+              activeRecoveryAction == nil,
               !fileSaveCleanupRequired else {
             presenterRefreshPending = true
             return
@@ -566,6 +762,8 @@ final class PhonePadAppModel: ObservableObject {
             return
         }
         guard !fileSaveInProgress,
+              !tabTransitionInProgress,
+              activeRecoveryAction == nil,
               !fileSaveCleanupRequired else {
             presenterRefreshPending = true
             return
@@ -573,6 +771,8 @@ final class PhonePadAppModel: ObservableObject {
         var detectedActiveConflict = false
         for registration in registrations {
             guard !fileSaveInProgress,
+                  !tabTransitionInProgress,
+                  activeRecoveryAction == nil,
                   !fileSaveCleanupRequired,
                   state.tabs.first(where: {
                       $0.document.id == registration.documentID
@@ -618,6 +818,12 @@ final class PhonePadAppModel: ObservableObject {
     func completePreflightedSaveAs(
         _ preflight: PreparedSaveAsPreflight
     ) async -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard !fileSaveCleanupRequired else {
             fileSaveError = PhonePadFileSaveActionError
                 .cleanupRequired
@@ -692,6 +898,12 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func confirmReplacementAndCompleteSaveAs() async -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard !fileSaveCleanupRequired else {
             fileSaveError = PhonePadFileSaveActionError
                 .cleanupRequired
@@ -767,6 +979,12 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func saveActiveDocument() async -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard !fileSaveCleanupRequired else {
             fileSaveError = PhonePadFileSaveActionError
                 .cleanupRequired
@@ -858,6 +1076,12 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func retryFileSaveCleanup() async -> Bool {
+        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard !fileSaveInProgress else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
@@ -928,6 +1152,14 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     func refreshRecoveryItems() async {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
         do {
             let storedItems = try await recoveryStore.recoveryItems()
             let openDocumentIDs = Set(state.tabs.map(\.document.id))
@@ -942,7 +1174,16 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     @discardableResult
-    func recoverRecovery(documentID: DocumentID) async -> Bool {
+    func recoverRecovery(
+        documentID: DocumentID,
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard !tabTransitionInProgress, !fileSaveInProgress else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard activeRecoveryAction == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
@@ -951,13 +1192,14 @@ final class PhonePadAppModel: ObservableObject {
         }
 
         activeRecoveryAction = documentID
-        defer { activeRecoveryAction = nil }
-
-        guard await currentDocumentIsReadyForTransition() else {
-            return false
-        }
+        defer { finishRecoveryAction() }
 
         do {
+            try validateCommittedDocument(committedDocument)
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
             guard let summary = recoveryItems.first(where: {
                 $0.documentID == documentID
             }) else {
@@ -994,6 +1236,12 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func discardRecovery(documentID: DocumentID) async -> Bool {
+        guard !tabTransitionInProgress, !fileSaveInProgress else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
         guard activeRecoveryAction == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
@@ -1002,7 +1250,7 @@ final class PhonePadAppModel: ObservableObject {
         }
 
         activeRecoveryAction = documentID
-        defer { activeRecoveryAction = nil }
+        defer { finishRecoveryAction() }
 
         do {
             let terminalOutcome = try await recoveryStore.discardRecovery(
@@ -1024,26 +1272,107 @@ final class PhonePadAppModel: ObservableObject {
         }
     }
 
+    private func prepareTabTransition() -> Bool {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              !fileSaveCleanupRequired,
+              pendingSaveAsReplacement == nil,
+              activeRecoveryAction == nil else {
+            tabTransitionError = PhonePadTabTransitionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        tabTransitionError = nil
+        return true
+    }
+
+    private func beginActiveDocumentTransition() -> Bool {
+        guard prepareTabTransition() else {
+            return false
+        }
+        activeDocumentTransitionInProgress = true
+        tabTransitionInProgress = true
+        return true
+    }
+
+    private func beginTabReorder() -> Bool {
+        guard prepareTabTransition() else {
+            return false
+        }
+        tabTransitionInProgress = true
+        return true
+    }
+
+    private func validateCommittedDocument(
+        _ committedDocument: CommittedEditorDocument
+    ) throws {
+        guard state.activeTab.document.id == committedDocument.documentID else {
+            throw PhonePadTabTransitionError.committedDocumentIsNotActive
+        }
+        let canonicalText = try validateEditableDocumentText(
+            text: committedDocument.text
+        )
+        guard state.activeTab.document.text == canonicalText else {
+            throw PhonePadTabTransitionError.committedTextWasRejected
+        }
+    }
+
+    private func protectCommittedDocumentForActiveTransition(
+        _ committedDocument: CommittedEditorDocument
+    ) async throws {
+        try validateCommittedDocument(committedDocument)
+        switch state.activeTab.document.recoveryState {
+        case .clean, .protectedUnsaved:
+            return
+        case .checkpointPending:
+            guard await retryCurrentCheckpointIfNeeded(),
+                  pendingCheckpoint == nil,
+                  failedCheckpoint == nil,
+                  state.activeTab.document.recoveryState == .protectedUnsaved else {
+                throw PhonePadTabTransitionError
+                    .checkpointMustFinishBeforeTransition
+            }
+            try validateCommittedDocument(committedDocument)
+        }
+    }
+
     func editActiveDocument(text: String) {
+        _ = editDocument(
+            documentID: state.activeTab.document.id,
+            text: text
+        )
+    }
+
+    @discardableResult
+    func editDocument(documentID: DocumentID, text: String) -> Bool {
+        guard state.activeTab.document.id == documentID else {
+            return false
+        }
         guard !fileSaveCleanupRequired else {
             if fileSaveError == nil {
                 fileSaveError = PhonePadFileSaveActionError
                     .cleanupRequired
                     .localizedDescription
             }
-            return
+            return false
         }
         guard !fileSaveInProgress else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
-            return
+            return false
+        }
+        guard pendingSaveAsReplacement == nil,
+              activeRecoveryAction == nil,
+              !activeDocumentTransitionInProgress else {
+            return false
         }
         guard failedCheckpoint == nil else {
-            return
+            return false
         }
         guard text != state.activeTab.document.text else {
-            return
+            return true
         }
 
         let previousState = state
@@ -1056,7 +1385,7 @@ final class PhonePadAppModel: ObservableObject {
             )
         } catch {
             recoveryError = error.localizedDescription
-            return
+            return false
         }
 
         state = transition.state
@@ -1076,6 +1405,7 @@ final class PhonePadAppModel: ObservableObject {
                 ?? (previousState.activeTab.document.recoveryState == .clean)
         )
         startCheckpointTaskIfNeeded()
+        return true
     }
 
     private func startCheckpointTaskIfNeeded() {
@@ -1119,19 +1449,6 @@ final class PhonePadAppModel: ObservableObject {
         checkpointTask = nil
     }
 
-    private func currentDocumentIsReadyForTransition() async -> Bool {
-        guard await retryCurrentCheckpointIfNeeded(),
-              pendingCheckpoint == nil,
-              failedCheckpoint == nil,
-              state.activeTab.document.recoveryState != .checkpointPending else {
-            recoveryCatalogError = PhonePadRecoveryActionError
-                .checkpointMustFinishBeforeRecovering
-                .localizedDescription
-            return false
-        }
-        return true
-    }
-
     private func currentDocumentIsReadyForFileTransition() async -> Bool {
         guard await retryCurrentCheckpointIfNeeded(),
               pendingCheckpoint == nil,
@@ -1159,8 +1476,26 @@ final class PhonePadAppModel: ObservableObject {
 
     private func finishFileMutation() {
         fileSaveInProgress = false
+        resumePendingPresentersAfterExclusiveAction()
+    }
+
+    private func finishTabTransition() {
+        activeDocumentTransitionInProgress = false
+        tabTransitionInProgress = false
+        resumePendingPresentersAfterExclusiveAction()
+    }
+
+    private func finishRecoveryAction() {
+        activeRecoveryAction = nil
+        resumePendingPresentersAfterExclusiveAction()
+    }
+
+    private func resumePendingPresentersAfterExclusiveAction() {
         guard presentersShouldBeActive,
               !fileSaveCleanupRequired,
+              !fileSaveInProgress,
+              !tabTransitionInProgress,
+              activeRecoveryAction == nil,
               presenterRefreshPending else {
             return
         }
