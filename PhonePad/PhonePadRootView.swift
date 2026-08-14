@@ -31,6 +31,12 @@ private enum PhonePadOpenPresentationError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadSaveAsPresentationOrigin: Equatable {
+    case explicit
+    case fileConflict
+    case tabClose(DocumentID)
+}
+
 private enum PhonePadFileAction {
     case open
     case save
@@ -74,7 +80,7 @@ struct PhonePadRootView: View {
     @State private var preparedSaveAs: PreparedSaveAs?
     @State private var folderPickerIsPresented: Bool
     @State private var saveAsValidationError: String?
-    @State private var saveAsWasPresentedFromFileConflict: Bool
+    @State private var saveAsPresentationOrigin: PhonePadSaveAsPresentationOrigin
     @State private var filePickerIsPresented: Bool
     @State private var fileAction: PhonePadFileAction?
     @State private var openCommittedDocument: CommittedEditorDocument?
@@ -90,7 +96,7 @@ struct PhonePadRootView: View {
         preparedSaveAs = nil
         folderPickerIsPresented = false
         saveAsValidationError = nil
-        saveAsWasPresentedFromFileConflict = false
+        saveAsPresentationOrigin = .explicit
         filePickerIsPresented = false
         fileAction = nil
         openCommittedDocument = nil
@@ -106,7 +112,9 @@ struct PhonePadRootView: View {
                     interactionDisabled: model.fileMutationDisabled,
                     onSelect: selectTab,
                     onMove: moveTab,
-                    onMoveError: model.reportTabTransitionError
+                    onMoveError: model.reportTabTransitionError,
+                    onClose: closeTab,
+                    onCloseOthers: closeOtherTabs
                 )
                 Divider()
                 PhonePadTextEditor(
@@ -163,7 +171,10 @@ struct PhonePadRootView: View {
                     .padding(8)
                     .background(Color.red)
                     .accessibilityIdentifier("phonepad.recovery-error")
-            }
+                }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            tabCloseFeedback
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             fileSaveFeedback
@@ -173,6 +184,9 @@ struct PhonePadRootView: View {
         }
         .sheet(isPresented: $saveAsIsPresented, onDismiss: resetSaveAsPresentation) {
             saveAsSheet
+        }
+        .sheet(isPresented: tabClosePromptIsPresented) {
+            tabClosePromptSheet
         }
         .sheet(isPresented: fileConflictResolutionIsPresented) {
             fileConflictResolutionSheet
@@ -242,6 +256,120 @@ struct PhonePadRootView: View {
         .disabled(model.fileMutationDisabled)
     }
 
+    private var tabClosePromptIsPresented: Binding<Bool> {
+        Binding(
+            get: { model.pendingTabClosePrompt != nil },
+            set: { _ in }
+        )
+    }
+
+    @ViewBuilder
+    private var tabClosePromptSheet: some View {
+        if let prompt = model.pendingTabClosePrompt {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(prompt.title)
+                        .font(.headline)
+
+                    Text("This Tab has unsaved changes.")
+                        .font(.body)
+
+                    if let tabCloseError = model.tabCloseError {
+                        Text(tabCloseError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("phonepad.tab-close.error")
+                    }
+
+                    if model.fileSaveInProgress
+                        || model.tabTransitionInProgress {
+                        ProgressView("Resolving Close")
+                            .accessibilityIdentifier(
+                                "phonepad.tab-close.progress"
+                            )
+                    }
+
+                    Button("Save") {
+                        savePendingTabClose()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                    .disabled(tabCloseDecisionDisabled)
+                    .accessibilityIdentifier("phonepad.tab-close.save")
+
+                    Button("Discard", role: .destructive) {
+                        discardPendingTabClose()
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                    .disabled(tabCloseDecisionDisabled)
+                    .accessibilityIdentifier("phonepad.tab-close.discard")
+
+                    Button("Cancel", role: .cancel) {
+                        model.cancelPendingTabClose()
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                    .disabled(tabCloseDecisionDisabled)
+                    .accessibilityIdentifier("phonepad.tab-close.cancel")
+                }
+                .padding()
+                .navigationTitle("Close Tab")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(
+                "phonepad.tab-close.prompt.\(prompt.documentID.rawValue.uuidString.lowercased())"
+            )
+            .interactiveDismissDisabled()
+            .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var tabCloseDecisionDisabled: Bool {
+        model.fileSaveInProgress || model.tabTransitionInProgress
+    }
+
+    @ViewBuilder
+    private var tabCloseFeedback: some View {
+        if model.tabCloseCleanupRequired,
+           let tabCloseError = model.tabCloseError {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(tabCloseError)
+                    .font(.footnote)
+                    .accessibilityIdentifier("phonepad.tab-close.error")
+
+                Button("Retry Cleanup") {
+                    retryPendingTabCloseCleanup()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.white)
+                .foregroundStyle(.red)
+                .disabled(model.tabTransitionInProgress)
+                .accessibilityIdentifier(
+                    "phonepad.tab-close.retry-cleanup"
+                )
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(Color.red)
+            .accessibilityIdentifier(
+                "phonepad.tab-close.cleanup-required"
+            )
+        } else if !model.fileSaveCleanupRequired,
+                  model.pendingTabClosePrompt == nil,
+                  let tabCloseError = model.tabCloseError {
+            Text(tabCloseError)
+                .font(.footnote)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.red)
+                .accessibilityIdentifier("phonepad.tab-close.error")
+        }
+    }
+
     private var saveAsSheet: some View {
         NavigationStack {
             Form {
@@ -249,7 +377,7 @@ struct PhonePadRootView: View {
                     TextField("File Name", text: $saveAsFileName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .disabled(model.fileMutationDisabled)
+                        .disabled(saveAsConfigurationDisabled)
                         .accessibilityIdentifier("phonepad.save-as.filename")
 
                     Picker("Encoding", selection: $saveAsEncoding) {
@@ -283,7 +411,7 @@ struct PhonePadRootView: View {
                             )
                     }
                     .pickerStyle(.menu)
-                    .disabled(model.fileMutationDisabled)
+                    .disabled(saveAsConfigurationDisabled)
                     .accessibilityIdentifier("phonepad.save-as.encoding")
                 }
 
@@ -330,7 +458,7 @@ struct PhonePadRootView: View {
                     Button("Cancel", role: .cancel) {
                         cancelSaveAs()
                     }
-                    .disabled(model.fileMutationDisabled)
+                    .disabled(saveAsConfigurationDisabled)
                     .accessibilityIdentifier("phonepad.save-as.configuration-cancel")
                 }
 
@@ -338,14 +466,14 @@ struct PhonePadRootView: View {
                     Button("Choose Folder") {
                         chooseSaveFolder()
                     }
-                    .disabled(model.fileMutationDisabled)
+                    .disabled(saveAsConfigurationDisabled)
                     .accessibilityIdentifier("phonepad.save-as.choose-folder")
                 }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("phonepad.save-as.sheet")
-        .interactiveDismissDisabled(model.fileMutationDisabled)
+        .interactiveDismissDisabled(saveAsConfigurationDisabled)
         .presentationDetents([.medium, .large])
         .sheet(isPresented: $folderPickerIsPresented) {
             PhonePadFolderPicker(
@@ -356,6 +484,15 @@ struct PhonePadRootView: View {
         }
         .sheet(isPresented: replacementConfirmationIsPresented) {
             replacementConfirmationSheet
+        }
+    }
+
+    private var saveAsConfigurationDisabled: Bool {
+        switch saveAsPresentationOrigin {
+        case .explicit, .fileConflict:
+            return model.fileMutationDisabled
+        case .tabClose:
+            return model.fileSaveInProgress || model.fileSaveCleanupRequired
         }
     }
 
@@ -521,6 +658,62 @@ struct PhonePadRootView: View {
         }
     }
 
+    private func closeTab(_ tabID: TabID) {
+        model.clearTabTransitionFeedback()
+        Task { @MainActor in
+            do {
+                let committedDocument = try editorTransitionController
+                    .commitMarkedText()
+                _ = await model.requestCloseTab(
+                    tabID,
+                    after: committedDocument
+                )
+            } catch {
+                model.reportTabTransitionError(error)
+            }
+        }
+    }
+
+    private func closeOtherTabs(keeping tabID: TabID) {
+        model.clearTabTransitionFeedback()
+        Task { @MainActor in
+            do {
+                let committedDocument = try editorTransitionController
+                    .commitMarkedText()
+                _ = await model.requestCloseOtherTabs(
+                    keeping: tabID,
+                    after: committedDocument
+                )
+            } catch {
+                model.reportTabTransitionError(error)
+            }
+        }
+    }
+
+    private func savePendingTabClose() {
+        Task { @MainActor in
+            let route = await model.savePendingTabClose()
+            switch route {
+            case .completed, .fileConflictRequired, .failed:
+                break
+            case let .saveAsRequired(documentID):
+                presentTabCloseSaveAs(documentID: documentID)
+            }
+        }
+    }
+
+    private func discardPendingTabClose() {
+        Task { @MainActor in
+            _ = await model.discardPendingTabClose()
+        }
+    }
+
+    private func retryPendingTabCloseCleanup() {
+        Task { @MainActor in
+            _ = await model.retryPendingTabCloseCleanup()
+        }
+    }
+
     private func saveActiveDocument() {
         model.clearFileSaveFeedback()
         fileAction = .save
@@ -557,12 +750,17 @@ struct PhonePadRootView: View {
     }
 
     private func presentSaveAsAfterEditorCommit() {
-        saveAsWasPresentedFromFileConflict = false
+        saveAsPresentationOrigin = .explicit
         configureSaveAsPresentation()
     }
 
     private func presentConflictSaveAsAfterEditorCommit() {
-        saveAsWasPresentedFromFileConflict = true
+        saveAsPresentationOrigin = .fileConflict
+        configureSaveAsPresentation()
+    }
+
+    private func presentTabCloseSaveAs(documentID: DocumentID) {
+        saveAsPresentationOrigin = .tabClose(documentID)
         configureSaveAsPresentation()
     }
 
@@ -628,6 +826,7 @@ struct PhonePadRootView: View {
                     return
                 }
                 saveAsValidationError = nil
+                saveAsPresentationOrigin = .explicit
                 saveAsIsPresented = false
             }
         }
@@ -797,10 +996,17 @@ struct PhonePadRootView: View {
             model.reportFileConflictTransitionError(error)
             return
         }
+        let pendingTabCloseDocumentID = model.pendingTabCloseDocumentID
         guard model.beginSaveAsFromFileConflict() else {
             return
         }
-        presentConflictSaveAsAfterEditorCommit()
+        if let pendingTabCloseDocumentID {
+            presentTabCloseSaveAs(
+                documentID: pendingTabCloseDocumentID
+            )
+        } else {
+            presentConflictSaveAsAfterEditorCommit()
+        }
     }
 
     private func confirmSaveAsReplacement() {
@@ -811,6 +1017,7 @@ struct PhonePadRootView: View {
                 return
             }
             saveAsValidationError = nil
+            saveAsPresentationOrigin = .explicit
             saveAsIsPresented = false
         }
     }
@@ -821,16 +1028,24 @@ struct PhonePadRootView: View {
     }
 
     private func resetSaveAsPresentation() {
-        let shouldReturnToFileConflict = saveAsWasPresentedFromFileConflict
-            && model.activeFileConflict != nil
+        let dismissedOrigin = saveAsPresentationOrigin
         model.cancelSaveAsReplacement()
         preparedSaveAs = nil
         saveAsValidationError = nil
         folderPickerIsPresented = false
         fileAction = nil
-        saveAsWasPresentedFromFileConflict = false
-        if shouldReturnToFileConflict {
+        saveAsPresentationOrigin = .explicit
+        switch dismissedOrigin {
+        case .explicit:
+            break
+        case .fileConflict where model.activeFileConflict != nil:
             model.presentFileConflictResolution()
+        case .fileConflict:
+            break
+        case let .tabClose(documentID):
+            _ = model.restorePendingTabCloseDecisionAfterSaveAsCancellation(
+                documentID: documentID
+            )
         }
     }
 
@@ -842,6 +1057,7 @@ struct PhonePadRootView: View {
             }
             preparedSaveAs = nil
             saveAsValidationError = nil
+            saveAsPresentationOrigin = .explicit
             saveAsIsPresented = false
         }
     }

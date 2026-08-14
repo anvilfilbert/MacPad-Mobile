@@ -443,6 +443,78 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testUnsavedTabCloseCancelAndDiscardUseStableIdentifiers() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let editor = app.textViews["phonepad.editor.text-view"]
+        let newTab = app.buttons["phonepad.toolbar.new-tab"]
+        let tabs = tabItems(in: app)
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(newTab.waitForExistence(timeout: 2))
+        XCTAssertEqual(tabs.count, 1)
+
+        newTab.tap()
+        XCTAssertTrue(waitForCount(tabs, count: 2, timeout: 5))
+        editor.tap()
+        editor.typeText("Unsaved close state")
+
+        let tabIdentifiers = tabs.allElementsBoundByIndex.map(\.identifier)
+        XCTAssertEqual(tabIdentifiers.count, 2)
+        let firstTabIdentifier = tabIdentifiers[0]
+        let closingTabIdentifier = tabIdentifiers[1]
+        let closingSuffix = String(
+            closingTabIdentifier.dropFirst("phonepad.tab.item.".count)
+        )
+        let closeButton = app.buttons["phonepad.tab.close.\(closingSuffix)"]
+        let dragHandle = app.descendants(matching: .any)[
+            "phonepad.tab.drag.\(closingSuffix)"
+        ].firstMatch
+        XCTAssertTrue(closeButton.waitForExistence(timeout: 2))
+        XCTAssertTrue(dragHandle.waitForExistence(timeout: 2))
+        XCTAssertEqual(closeButton.frame.width, 44, accuracy: 0.01)
+        XCTAssertFalse(closeButton.frame.intersects(dragHandle.frame))
+
+        closeButton.tap()
+        let prompt = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "phonepad.tab-close.prompt."
+            )
+        ).firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        let cancel = app.buttons["phonepad.tab-close.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 2))
+        cancel.tap()
+        XCTAssertTrue(prompt.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(tabs[closingTabIdentifier].exists)
+        XCTAssertTrue(
+            waitForValue(editor, value: "Unsaved close state", timeout: 5)
+        )
+
+        closeButton.tap()
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        let discard = app.buttons["phonepad.tab-close.discard"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 2))
+        discard.tap()
+        XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 5))
+        XCTAssertFalse(tabs[closingTabIdentifier].exists)
+        XCTAssertTrue(tabs[firstTabIdentifier].exists)
+
+        let firstSuffix = String(
+            firstTabIdentifier.dropFirst("phonepad.tab.item.".count)
+        )
+        let cleanClose = app.buttons["phonepad.tab.close.\(firstSuffix)"]
+        XCTAssertTrue(cleanClose.waitForExistence(timeout: 2))
+        cleanClose.tap()
+        XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 5))
+        XCTAssertFalse(tabs[firstTabIdentifier].exists)
+    }
+
+    @MainActor
     func testTabStripGrowsForAccessibilityContentSize() {
         let app = XCUIApplication()
         app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString

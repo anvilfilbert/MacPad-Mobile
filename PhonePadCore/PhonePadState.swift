@@ -128,6 +128,27 @@ public struct PhonePadTab: Equatable, Sendable {
     }
 }
 
+public struct PreparedCleanTabClose: Equatable, Sendable {
+    public let tab: PhonePadTab
+
+    init(tab: PhonePadTab) {
+        self.tab = tab
+    }
+}
+
+public struct PreparedUnsavedTabClose: Equatable, Sendable {
+    public let tab: PhonePadTab
+
+    init(tab: PhonePadTab) {
+        self.tab = tab
+    }
+}
+
+public enum TabCloseRequirement: Equatable, Sendable {
+    case clean(PreparedCleanTabClose)
+    case unsaved(PreparedUnsavedTabClose)
+}
+
 public struct PhonePadState: Equatable, Sendable {
     public let tabs: [PhonePadTab]
     public let activeTabID: TabID
@@ -172,6 +193,7 @@ public enum PhonePadStateError: Error, Equatable, Sendable {
     case duplicateTabID(TabID)
     case duplicateDocumentID(DocumentID)
     case tabMissing(TabID)
+    case tabChangedSinceClosePreparation(TabID)
     case tabPlacementAnchorMissing(TabID)
     case activeTabMissing(TabID)
     case documentMissing(DocumentID)
@@ -198,6 +220,8 @@ extension PhonePadStateError: LocalizedError {
             return "Document identifier \(documentID.rawValue.uuidString) already belongs to an open Document. Generate a unique Document identifier and try again."
         case let .tabMissing(tabID):
             return "Tab \(tabID.rawValue.uuidString) no longer exists. Refresh the Tab workspace and try again."
+        case let .tabChangedSinceClosePreparation(tabID):
+            return "Tab \(tabID.rawValue.uuidString) changed while Close was being resolved. Keep it open and retry Close."
         case let .tabPlacementAnchorMissing(tabID):
             return "Tab reorder destination \(tabID.rawValue.uuidString) no longer exists. Refresh the Tab workspace and try again."
         case .activeTabMissing:
@@ -389,6 +413,111 @@ public func moveTab(
         tabs.append(movedTab)
     }
     return PhonePadState(tabs: tabs, activeTabID: state.activeTabID)
+}
+
+public func prepareTabClose(
+    state: PhonePadState,
+    tabID: TabID
+) throws -> TabCloseRequirement {
+    guard let tab = state.tabs.first(where: { $0.id == tabID }) else {
+        throw PhonePadStateError.tabMissing(tabID)
+    }
+    return tabCloseRequirement(tab: tab)
+}
+
+public func prepareOtherTabCloses(
+    state: PhonePadState,
+    keepingTabID: TabID
+) throws -> [TabCloseRequirement] {
+    guard state.tabs.contains(where: { $0.id == keepingTabID }) else {
+        throw PhonePadStateError.tabMissing(keepingTabID)
+    }
+    return state.tabs.compactMap { tab in
+        guard tab.id != keepingTabID else {
+            return nil
+        }
+        return tabCloseRequirement(tab: tab)
+    }
+}
+
+public func closePreparedCleanTab(
+    state: PhonePadState,
+    preparedClose: PreparedCleanTabClose,
+    replacementDocumentID: DocumentID,
+    replacementTabID: TabID
+) throws -> PhonePadState {
+    try closePreparedTab(
+        state: state,
+        expectedTab: preparedClose.tab,
+        replacementDocumentID: replacementDocumentID,
+        replacementTabID: replacementTabID
+    )
+}
+
+public func closePreparedDiscardedTab(
+    state: PhonePadState,
+    preparedClose: PreparedUnsavedTabClose,
+    replacementDocumentID: DocumentID,
+    replacementTabID: TabID
+) throws -> PhonePadState {
+    try closePreparedTab(
+        state: state,
+        expectedTab: preparedClose.tab,
+        replacementDocumentID: replacementDocumentID,
+        replacementTabID: replacementTabID
+    )
+}
+
+private func tabCloseRequirement(
+    tab: PhonePadTab
+) -> TabCloseRequirement {
+    guard !tab.document.isUnsaved,
+          tab.document.recoveryState == .clean else {
+        return .unsaved(PreparedUnsavedTabClose(tab: tab))
+    }
+    return .clean(PreparedCleanTabClose(tab: tab))
+}
+
+private func closePreparedTab(
+    state: PhonePadState,
+    expectedTab: PhonePadTab,
+    replacementDocumentID: DocumentID,
+    replacementTabID: TabID
+) throws -> PhonePadState {
+    guard let closingIndex = state.tabs.firstIndex(where: {
+        $0.id == expectedTab.id
+    }) else {
+        throw PhonePadStateError.tabMissing(expectedTab.id)
+    }
+    guard state.tabs[closingIndex] == expectedTab else {
+        throw PhonePadStateError.tabChangedSinceClosePreparation(
+            expectedTab.id
+        )
+    }
+    guard state.tabs.count > 1 else {
+        guard replacementTabID != expectedTab.id else {
+            throw PhonePadStateError.duplicateTabID(replacementTabID)
+        }
+        guard replacementDocumentID != expectedTab.document.id else {
+            throw PhonePadStateError.duplicateDocumentID(
+                replacementDocumentID
+            )
+        }
+        return makeInitialPhonePadState(
+            documentID: replacementDocumentID,
+            tabID: replacementTabID
+        )
+    }
+
+    var tabs = state.tabs
+    _ = tabs.remove(at: closingIndex)
+    let activeTabID: TabID
+    if state.activeTabID == expectedTab.id {
+        activeTabID = tabs[min(closingIndex, tabs.count - 1)].id
+    } else {
+        activeTabID = state.activeTabID
+    }
+    return PhonePadState(tabs: tabs, activeTabID: activeTabID)
 }
 
 public func recoverDocument(

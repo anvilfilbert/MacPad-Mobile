@@ -32,6 +32,40 @@ private enum PendingFileSaveCleanup {
     }
 }
 
+struct PendingTabClosePrompt: Equatable, Sendable {
+    let tabID: TabID
+    let documentID: DocumentID
+    let title: String
+}
+
+enum TabCloseSaveRoute: Equatable, Sendable {
+    case completed
+    case saveAsRequired(DocumentID)
+    case fileConflictRequired(DocumentID)
+    case failed
+}
+
+private struct PendingTabCloseSession {
+    var requirements: [TabCloseRequirement]
+    let originalActiveTabID: TabID
+    let retainedTabID: TabID?
+    var phase: PendingTabClosePhase
+}
+
+private enum PendingTabClosePhase: Equatable {
+    case processing
+    case decision(TabID)
+    case saveAs(TabID)
+    case fileConflict(TabID)
+    case cleanup(TabID)
+}
+
+private struct PendingTabCloseCleanup {
+    let preparedClose: PreparedUnsavedTabClose
+    let replacementDocumentID: DocumentID
+    let replacementTabID: TabID
+}
+
 private enum PhonePadRecoveryActionError: Error, LocalizedError {
     case actionAlreadyInProgress
     case checkpointHeldForFileConflictReload
@@ -98,6 +132,38 @@ private enum PhonePadTabTransitionError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadTabCloseActionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+    case cleanupNotRequired
+    case cleanupRequired
+    case noPendingDecision
+    case pendingTabRemainsUnsaved
+    case saveAsCancellationDocumentMismatch(
+        expected: DocumentID,
+        actual: DocumentID
+    )
+    case saveAsCancellationNotPending
+
+    var errorDescription: String? {
+        switch self {
+        case .actionAlreadyInProgress:
+            "Another File, recovery, or Tab action is still running. Wait for it to finish and retry Close."
+        case .cleanupNotRequired:
+            "No Tab cleanup is waiting. Close an unsaved Tab and choose Discard before retrying cleanup."
+        case .cleanupRequired:
+            "Protected edit cleanup is still required. Choose Retry Cleanup before resolving another Tab."
+        case .noPendingDecision:
+            "No unsaved Tab is waiting for a Close decision. Request Close again."
+        case .pendingTabRemainsUnsaved:
+            "The pending Tab remains unsaved after the File action. Keep it open and retry Save."
+        case let .saveAsCancellationDocumentMismatch(expected, actual):
+            "Save As cancellation belongs to Document \(actual.rawValue.uuidString), but Close is waiting for Document \(expected.rawValue.uuidString). Keep the pending Tab open and cancel its Save As sheet."
+        case .saveAsCancellationNotPending:
+            "No Close-triggered Save As sheet is waiting for cancellation. Keep the current Close decision open."
+        }
+    }
+}
+
 @MainActor
 final class PhonePadAppModel: ObservableObject {
     @Published private(set) var state: PhonePadState
@@ -114,6 +180,9 @@ final class PhonePadAppModel: ObservableObject {
     @Published private(set) var fileConflictError: String?
     @Published private(set) var tabTransitionError: String?
     @Published private(set) var tabTransitionInProgress: Bool
+    @Published private(set) var pendingTabClosePrompt: PendingTabClosePrompt?
+    @Published private(set) var tabCloseError: String?
+    @Published private(set) var tabCloseCleanupRequired: Bool
 
     private let recoveryStore: any RecoveryStoring
     private let fileAccessConnector: FileAccessConnector
@@ -130,6 +199,9 @@ final class PhonePadAppModel: ObservableObject {
     private var presenterRefreshPending: Bool
     private var editGeneration: UInt64
     private var activeDocumentTransitionInProgress: Bool
+    private var pendingTabCloseSession: PendingTabCloseSession?
+    private var pendingTabCloseCleanup: PendingTabCloseCleanup?
+    private var pendingTabCloseBoundSaveDocumentID: DocumentID?
 
     init(
         state: PhonePadState,
@@ -159,6 +231,9 @@ final class PhonePadAppModel: ObservableObject {
         fileConflictError = nil
         tabTransitionError = nil
         tabTransitionInProgress = false
+        pendingTabClosePrompt = nil
+        tabCloseError = nil
+        tabCloseCleanupRequired = false
         pendingCheckpoint = nil
         failedCheckpoint = nil
         pendingFileSaveCleanup = nil
@@ -168,6 +243,9 @@ final class PhonePadAppModel: ObservableObject {
         presenterRefreshPending = false
         editGeneration = 0
         activeDocumentTransitionInProgress = false
+        pendingTabCloseSession = nil
+        pendingTabCloseCleanup = nil
+        pendingTabCloseBoundSaveDocumentID = nil
         startPresentationHintTask()
     }
 
@@ -223,21 +301,113 @@ final class PhonePadAppModel: ObservableObject {
         state.activeTab.document.fileConflict
     }
 
+    var pendingTabCloseDocumentID: DocumentID? {
+        guard let session = pendingTabCloseSession,
+              let tabID = pendingTabCloseCandidateTabID,
+              let requirement = session.requirements.first(where: {
+                  tabCloseRequirementTab($0).id == tabID
+              }) else {
+            return nil
+        }
+        return tabCloseRequirementTab(requirement).document.id
+    }
+
     var fileMutationDisabled: Bool {
         editorInteractionDisabled
+            || fileSaveCleanupRequired
+            || pendingTabCloseSession != nil
             || tabTransitionInProgress
     }
 
     var editorInteractionDisabled: Bool {
         fileSaveInProgress
-            || fileSaveCleanupRequired
             || pendingSaveAsReplacement != nil
             || activeRecoveryAction != nil
             || activeDocumentTransitionInProgress
     }
 
     var editorMutationDisabled: Bool {
-        editorInteractionDisabled || failedCheckpoint != nil
+        editorInteractionDisabled
+            || fileSaveCleanupRequired
+            || pendingTabCloseSession != nil
+            || failedCheckpoint != nil
+    }
+
+    private var pendingTabCloseCandidateTabID: TabID? {
+        guard let session = pendingTabCloseSession else {
+            return nil
+        }
+        switch session.phase {
+        case .processing:
+            return nil
+        case let .decision(tabID),
+             let .saveAs(tabID),
+             let .fileConflict(tabID),
+             let .cleanup(tabID):
+            return tabID
+        }
+    }
+
+    private var activePendingTabClosePhase: PendingTabClosePhase? {
+        guard pendingTabCloseSession != nil else {
+            return nil
+        }
+        guard let candidateTabID = pendingTabCloseCandidateTabID,
+              state.activeTabID == candidateTabID else {
+            return nil
+        }
+        return pendingTabCloseSession?.phase
+    }
+
+    private var pendingTabCloseAllowsBoundSave: Bool {
+        guard pendingTabCloseSession != nil else {
+            return true
+        }
+        guard !tabCloseCleanupRequired,
+              let phase = activePendingTabClosePhase,
+              case .decision = phase,
+              pendingTabCloseBoundSaveDocumentID
+                == state.activeTab.document.id else {
+            return false
+        }
+        return true
+    }
+
+    private var pendingTabCloseAllowsSaveAsAction: Bool {
+        guard pendingTabCloseSession != nil else {
+            return true
+        }
+        guard !tabCloseCleanupRequired,
+              let phase = activePendingTabClosePhase,
+              case .saveAs = phase else {
+            return false
+        }
+        return true
+    }
+
+    private var pendingTabCloseAllowsFileConflictAction: Bool {
+        guard pendingTabCloseSession != nil else {
+            return true
+        }
+        guard !tabCloseCleanupRequired,
+              let phase = activePendingTabClosePhase,
+              case .fileConflict = phase else {
+            return false
+        }
+        return true
+    }
+
+    private var pendingTabCloseAllowsFileSaveCleanup: Bool {
+        guard pendingTabCloseSession != nil else {
+            return true
+        }
+        guard !tabCloseCleanupRequired,
+              fileSaveCleanupRequired,
+              let phase = activePendingTabClosePhase,
+              case .cleanup = phase else {
+            return false
+        }
+        return true
     }
 
     func clearTabTransitionFeedback() {
@@ -354,6 +524,333 @@ final class PhonePadAppModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func requestCloseTab(
+        _ tabID: TabID,
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard beginTabCloseRequest() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        do {
+            try validateCommittedDocument(committedDocument)
+            let requirement = try prepareTabClose(
+                state: state,
+                tabID: tabID
+            )
+            return try await beginPendingTabCloseSession(
+                requirements: [requirement],
+                retainedTabID: nil,
+                committedDocument: committedDocument
+            )
+        } catch {
+            cancelPendingTabCloseSessionAfterFailure()
+            tabCloseError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func requestCloseOtherTabs(
+        keeping retainedTabID: TabID,
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard beginTabCloseRequest() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        do {
+            try validateCommittedDocument(committedDocument)
+            let requirements = try prepareOtherTabCloses(
+                state: state,
+                keepingTabID: retainedTabID
+            )
+            return try await beginPendingTabCloseSession(
+                requirements: requirements,
+                retainedTabID: retainedTabID,
+                committedDocument: committedDocument
+            )
+        } catch {
+            cancelPendingTabCloseSessionAfterFailure()
+            tabCloseError = error.localizedDescription
+            return false
+        }
+    }
+
+    func cancelPendingTabClose() {
+        guard let session = pendingTabCloseSession,
+              case .decision = session.phase,
+              !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil,
+              !tabCloseCleanupRequired else {
+            return
+        }
+        do {
+            try restoreStableTabSelectionForPendingClose()
+        } catch {
+            tabCloseError = error.localizedDescription
+            return
+        }
+        pendingTabCloseSession = nil
+        pendingTabClosePrompt = nil
+        pendingTabCloseCleanup = nil
+        tabCloseError = nil
+        resumePendingPresentersAfterExclusiveAction()
+    }
+
+    @discardableResult
+    func discardPendingTabClose() async -> Bool {
+        guard beginPendingTabCloseDecisionResolution() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        guard let prompt = pendingTabClosePrompt,
+              let requirementIndex = pendingTabCloseRequirementIndex(
+                tabID: prompt.tabID
+              ),
+              let preparedClose = pendingUnsavedTabClose(
+                at: requirementIndex
+              ) else {
+            tabCloseError = PhonePadTabCloseActionError
+                .noPendingDecision
+                .localizedDescription
+            return false
+        }
+
+        await cancelAndAwaitCheckpointTask()
+        let replacementDocumentID = DocumentID(rawValue: UUID())
+        let replacementTabID = TabID(rawValue: UUID())
+        do {
+            let result = try await discardAndClosePreparedUnsavedTab(
+                state: state,
+                preparedClose: preparedClose,
+                replacementDocumentID: replacementDocumentID,
+                replacementTabID: replacementTabID,
+                recoveryStore: recoveryStore
+            )
+            try await applyDiscardedTabClose(
+                result,
+                requirementIndex: requirementIndex
+            )
+            return true
+        } catch let error as TabCloseWorkflowError {
+            if case .recoveryCleanupFailed = error {
+                pendingTabCloseCleanup = PendingTabCloseCleanup(
+                    preparedClose: preparedClose,
+                    replacementDocumentID: replacementDocumentID,
+                    replacementTabID: replacementTabID
+                )
+                pendingTabClosePrompt = nil
+                tabCloseCleanupRequired = true
+                pendingTabCloseSession?.phase = .cleanup(
+                    preparedClose.tab.id
+                )
+            }
+            tabCloseError = error.localizedDescription
+            return false
+        } catch {
+            tabCloseError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func retryPendingTabCloseCleanup() async -> Bool {
+        guard beginPendingTabCloseCleanupResolution() else {
+            return false
+        }
+        defer { finishTabTransition() }
+
+        guard let cleanup = pendingTabCloseCleanup,
+              let requirementIndex = pendingTabCloseRequirementIndex(
+                tabID: cleanup.preparedClose.tab.id
+              ) else {
+            tabCloseError = PhonePadTabCloseActionError
+                .cleanupNotRequired
+                .localizedDescription
+            return false
+        }
+
+        await cancelAndAwaitCheckpointTask()
+        do {
+            let result = try await discardAndClosePreparedUnsavedTab(
+                state: state,
+                preparedClose: cleanup.preparedClose,
+                replacementDocumentID: cleanup.replacementDocumentID,
+                replacementTabID: cleanup.replacementTabID,
+                recoveryStore: recoveryStore
+            )
+            try await applyDiscardedTabClose(
+                result,
+                requirementIndex: requirementIndex
+            )
+            return true
+        } catch {
+            tabCloseError = error.localizedDescription
+            return false
+        }
+    }
+
+    func savePendingTabClose() async -> TabCloseSaveRoute {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil,
+              !tabCloseCleanupRequired,
+              let prompt = pendingTabClosePrompt,
+              let requirementIndex = pendingTabCloseRequirementIndex(
+                tabID: prompt.tabID
+              ),
+              pendingUnsavedTabClose(at: requirementIndex) != nil else {
+            tabCloseError = PhonePadTabCloseActionError
+                .noPendingDecision
+                .localizedDescription
+            return .failed
+        }
+
+        do {
+            state = try PhonePadCore.selectTab(
+                state: state,
+                tabID: prompt.tabID
+            )
+        } catch {
+            tabCloseError = error.localizedDescription
+            return .failed
+        }
+
+        let document = state.activeTab.document
+        guard document.id == prompt.documentID else {
+            tabCloseError = PhonePadTabTransitionError
+                .activeDocumentChangedDuringTransition
+                .localizedDescription
+            return .failed
+        }
+        guard document.fileBinding != nil else {
+            setPendingTabClosePhase(.saveAs(prompt.tabID))
+            pendingTabClosePrompt = nil
+            tabCloseError = nil
+            return .saveAsRequired(document.id)
+        }
+        guard document.fileConflict == nil else {
+            setPendingTabClosePhase(.fileConflict(prompt.tabID))
+            pendingTabClosePrompt = nil
+            tabCloseError = nil
+            fileConflictError = nil
+            fileConflictResolutionIsPresented = true
+            return .fileConflictRequired(document.id)
+        }
+
+        pendingTabCloseBoundSaveDocumentID = document.id
+        let didSave = await saveActiveDocument()
+        pendingTabCloseBoundSaveDocumentID = nil
+        guard didSave else {
+            if fileSaveCleanupRequired {
+                setPendingTabClosePhase(.cleanup(prompt.tabID))
+                pendingTabClosePrompt = nil
+            } else if state.activeTab.document.fileConflict != nil {
+                setPendingTabClosePhase(.fileConflict(prompt.tabID))
+                pendingTabClosePrompt = nil
+                tabCloseError = nil
+                return .fileConflictRequired(document.id)
+            } else {
+                do {
+                    let preparedClose = try refreshPendingUnsavedTabClose(
+                        tabID: prompt.tabID
+                    )
+                    publishPendingTabClosePrompt(
+                        preparedClose: preparedClose
+                    )
+                } catch {
+                    tabCloseError = error.localizedDescription
+                    return .failed
+                }
+            }
+            tabCloseError = fileSaveError
+            return .failed
+        }
+        guard await resumePendingTabCloseAfterSuccessfulSave(
+            documentID: document.id
+        ) else {
+            return .failed
+        }
+        return .completed
+    }
+
+    @discardableResult
+    func restorePendingTabCloseDecisionAfterSaveAsCancellation(
+        documentID: DocumentID
+    ) -> Bool {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil else {
+            tabCloseError = PhonePadTabCloseActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard let session = pendingTabCloseSession,
+              case let .saveAs(tabID) = session.phase,
+              let requirementIndex = pendingTabCloseRequirementIndex(
+                tabID: tabID
+              ),
+              let preparedClose = pendingUnsavedTabClose(
+                at: requirementIndex
+              ) else {
+            tabCloseError = PhonePadTabCloseActionError
+                .saveAsCancellationNotPending
+                .localizedDescription
+            return false
+        }
+        guard preparedClose.tab.document.id == documentID else {
+            tabCloseError = PhonePadTabCloseActionError
+                .saveAsCancellationDocumentMismatch(
+                    expected: preparedClose.tab.document.id,
+                    actual: documentID
+                )
+                .localizedDescription
+            return false
+        }
+        do {
+            let refreshedClose = try refreshPendingUnsavedTabClose(
+                tabID: tabID
+            )
+            publishPendingTabClosePrompt(preparedClose: refreshedClose)
+            tabCloseError = nil
+            return true
+        } catch {
+            tabCloseError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func restorePendingTabCloseDecisionAfterFileConflictCancellation() {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil else {
+            tabCloseError = PhonePadTabCloseActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
+        guard let session = pendingTabCloseSession,
+              case let .fileConflict(tabID) = session.phase else {
+            return
+        }
+        do {
+            let preparedClose = try refreshPendingUnsavedTabClose(
+                tabID: tabID
+            )
+            publishPendingTabClosePrompt(preparedClose: preparedClose)
+            tabCloseError = nil
+        } catch {
+            tabCloseError = error.localizedDescription
+        }
+    }
+
     func clearFileSaveFeedback() {
         guard !fileSaveCleanupRequired else {
             return
@@ -372,7 +869,9 @@ final class PhonePadAppModel: ObservableObject {
         selectedURL: URL,
         after committedDocument: CommittedEditorDocument
     ) async -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -458,7 +957,9 @@ final class PhonePadAppModel: ObservableObject {
         fileName: String,
         encoding: TextFileEncoding
     ) throws -> PreparedSaveAs {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsSaveAsAction else {
             throw PhonePadFileSaveActionError.actionAlreadyInProgress
         }
         guard !fileSaveCleanupRequired else {
@@ -481,7 +982,9 @@ final class PhonePadAppModel: ObservableObject {
         preparation: PreparedSaveAs,
         selectedDirectoryURL: URL
     ) async -> PreparedSaveAsPreflight? {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsSaveAsAction else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -532,7 +1035,9 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     func presentFileConflictResolution() {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsFileConflictAction else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -548,11 +1053,14 @@ final class PhonePadAppModel: ObservableObject {
     func cancelFileConflictResolution() {
         fileConflictResolutionIsPresented = false
         fileConflictError = nil
+        restorePendingTabCloseDecisionAfterFileConflictCancellation()
     }
 
     @discardableResult
     func beginSaveAsFromFileConflict() -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsFileConflictAction else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -566,6 +1074,10 @@ final class PhonePadAppModel: ObservableObject {
         }
         fileConflictResolutionIsPresented = false
         fileConflictError = nil
+        if let tabID = pendingTabCloseCandidateTabID,
+           pendingTabCloseSession?.phase == .fileConflict(tabID) {
+            setPendingTabClosePhase(.saveAs(tabID))
+        }
         return true
     }
 
@@ -575,7 +1087,9 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func discardEditsAndReloadCurrentFile() async -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsFileConflictAction else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -627,6 +1141,9 @@ final class PhonePadAppModel: ObservableObject {
                 ? "Edits were discarded and current File content was reloaded. Protected cleanup remains and PhonePad will retry it on next recovery access."
                 : nil
             fileConflictResolutionIsPresented = state.activeTab.document.fileConflict != nil
+            _ = await resumePendingTabCloseAfterSuccessfulSave(
+                documentID: documentID
+            )
             return true
         } catch {
             fileConflictError = error.localizedDescription
@@ -643,7 +1160,8 @@ final class PhonePadAppModel: ObservableObject {
         guard !fileSaveInProgress,
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              !fileSaveCleanupRequired else {
+              !fileSaveCleanupRequired,
+              pendingTabCloseSession == nil else {
             presenterRefreshPending = true
             return
         }
@@ -668,7 +1186,8 @@ final class PhonePadAppModel: ObservableObject {
             guard !fileSaveInProgress,
                   !tabTransitionInProgress,
                   activeRecoveryAction == nil,
-                  !fileSaveCleanupRequired else {
+                  !fileSaveCleanupRequired,
+                  pendingTabCloseSession == nil else {
                 presenterRefreshPending = true
                 return
             }
@@ -700,7 +1219,7 @@ final class PhonePadAppModel: ObservableObject {
         presenterLifecycleGeneration += 1
         let generation = presenterLifecycleGeneration
         presentersShouldBeActive = false
-        if !fileSaveCleanupRequired {
+        if !fileSaveCleanupRequired, pendingTabCloseSession == nil {
             presenterRefreshPending = false
         }
         await fileAccessConnector.pausePresenters()
@@ -708,7 +1227,9 @@ final class PhonePadAppModel: ObservableObject {
               !presentersShouldBeActive else {
             return
         }
-        guard !fileSaveInProgress, !tabTransitionInProgress else {
+        guard !fileSaveInProgress,
+              !tabTransitionInProgress,
+              pendingTabCloseSession == nil else {
             return
         }
         _ = await retryCurrentCheckpointIfNeeded()
@@ -722,7 +1243,9 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     func retryActiveFileReconciliation() async {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -740,7 +1263,8 @@ final class PhonePadAppModel: ObservableObject {
         guard !fileSaveInProgress,
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              !fileSaveCleanupRequired else {
+              !fileSaveCleanupRequired,
+              pendingTabCloseSession == nil else {
             presenterRefreshPending = true
             return
         }
@@ -764,7 +1288,8 @@ final class PhonePadAppModel: ObservableObject {
         guard !fileSaveInProgress,
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              !fileSaveCleanupRequired else {
+              !fileSaveCleanupRequired,
+              pendingTabCloseSession == nil else {
             presenterRefreshPending = true
             return
         }
@@ -774,6 +1299,7 @@ final class PhonePadAppModel: ObservableObject {
                   !tabTransitionInProgress,
                   activeRecoveryAction == nil,
                   !fileSaveCleanupRequired,
+                  pendingTabCloseSession == nil,
                   state.tabs.first(where: {
                       $0.document.id == registration.documentID
                   })?.document.fileBinding == registration.binding,
@@ -818,7 +1344,9 @@ final class PhonePadAppModel: ObservableObject {
     func completePreflightedSaveAs(
         _ preflight: PreparedSaveAsPreflight
     ) async -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsSaveAsAction else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -878,6 +1406,9 @@ final class PhonePadAppModel: ObservableObject {
                 throw SaveAsWorkflowError.targetRequiresReplacement
             }
             applyCompletedSaveAs(result)
+            _ = await resumePendingTabCloseAfterSuccessfulSave(
+                documentID: preflight.preparedSave.documentID
+            )
             return true
         } catch let error as FileAccessConnectorError {
             if case .currentFile = preflight.target,
@@ -898,7 +1429,9 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func confirmReplacementAndCompleteSaveAs() async -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsSaveAsAction else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -950,6 +1483,9 @@ final class PhonePadAppModel: ObservableObject {
                 recoveryStore: recoveryStore
             )
             applyCompletedSaveAs(result)
+            _ = await resumePendingTabCloseAfterSuccessfulSave(
+                documentID: replacement.preparedSave.documentID
+            )
             return true
         } catch {
             applySaveAsFailure(error)
@@ -973,13 +1509,21 @@ final class PhonePadAppModel: ObservableObject {
            case let .outputVerifiedButRecoveryCleanupFailed(result, _) = workflowError {
             pendingFileSaveCleanup = .saveAs(result)
             fileSaveCleanupRequired = true
+            if result.state.activeTab.document.id
+                == pendingTabCloseDocumentID,
+               let tabID = pendingTabCloseCandidateTabID {
+                setPendingTabClosePhase(.cleanup(tabID))
+                pendingTabClosePrompt = nil
+            }
         }
         fileSaveError = error.localizedDescription
     }
 
     @discardableResult
     func saveActiveDocument() async -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsBoundSave else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1055,6 +1599,12 @@ final class PhonePadAppModel: ObservableObject {
             ) = error {
                 pendingFileSaveCleanup = .standard(result)
                 fileSaveCleanupRequired = true
+                if result.state.activeTab.document.id
+                    == pendingTabCloseDocumentID,
+                   let tabID = pendingTabCloseCandidateTabID {
+                    setPendingTabClosePhase(.cleanup(tabID))
+                    pendingTabClosePrompt = nil
+                }
             }
             fileSaveError = error.localizedDescription
             return false
@@ -1076,7 +1626,9 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func retryFileSaveCleanup() async -> Bool {
-        guard !tabTransitionInProgress, activeRecoveryAction == nil else {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseAllowsFileSaveCleanup else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1100,8 +1652,9 @@ final class PhonePadAppModel: ObservableObject {
         defer { finishFileMutation() }
 
         do {
+            let cleanupDocumentID = pendingFileSaveCleanup.documentID
             let terminalOutcome = try await recoveryStore.completeRecoveryAfterSave(
-                documentID: pendingFileSaveCleanup.documentID
+                documentID: cleanupDocumentID
             )
             switch pendingFileSaveCleanup {
             case let .standard(result):
@@ -1124,6 +1677,9 @@ final class PhonePadAppModel: ObservableObject {
             self.pendingFileSaveCleanup = nil
             fileSaveCleanupRequired = false
             fileSaveError = nil
+            _ = await resumePendingTabCloseAfterSuccessfulSave(
+                documentID: cleanupDocumentID
+            )
             return true
         } catch {
             let cleanupFailure = RecoveryCleanupFailure(capturing: error)
@@ -1154,7 +1710,8 @@ final class PhonePadAppModel: ObservableObject {
     func refreshRecoveryItems() async {
         guard !tabTransitionInProgress,
               !fileSaveInProgress,
-              activeRecoveryAction == nil else {
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1178,7 +1735,9 @@ final class PhonePadAppModel: ObservableObject {
         documentID: DocumentID,
         after committedDocument: CommittedEditorDocument
     ) async -> Bool {
-        guard !tabTransitionInProgress, !fileSaveInProgress else {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              pendingTabCloseSession == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1236,7 +1795,9 @@ final class PhonePadAppModel: ObservableObject {
 
     @discardableResult
     func discardRecovery(documentID: DocumentID) async -> Bool {
-        guard !tabTransitionInProgress, !fileSaveInProgress else {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              pendingTabCloseSession == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1272,12 +1833,354 @@ final class PhonePadAppModel: ObservableObject {
         }
     }
 
+    private func beginTabCloseRequest() -> Bool {
+        guard prepareTabTransition() else {
+            tabCloseError = tabTransitionError
+            return false
+        }
+        activeDocumentTransitionInProgress = true
+        tabTransitionInProgress = true
+        tabCloseError = nil
+        return true
+    }
+
+    private func beginPendingTabCloseSession(
+        requirements: [TabCloseRequirement],
+        retainedTabID: TabID?,
+        committedDocument: CommittedEditorDocument
+    ) async throws -> Bool {
+        guard !requirements.isEmpty else {
+            tabCloseError = nil
+            return true
+        }
+
+        let originalActiveTabID = state.activeTabID
+        do {
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
+        } catch {
+            guard let activeRequirement = requirements.first(where: {
+                tabCloseRequirementTab($0).id == originalActiveTabID
+            }), case let .unsaved(preparedClose) = activeRequirement else {
+                throw error
+            }
+            pendingTabCloseSession = PendingTabCloseSession(
+                requirements: requirements,
+                originalActiveTabID: originalActiveTabID,
+                retainedTabID: retainedTabID,
+                phase: .processing
+            )
+            publishPendingTabClosePrompt(preparedClose: preparedClose)
+            tabCloseError = nil
+            return true
+        }
+
+        let refreshedRequirements = try requirements.map { requirement in
+            try prepareTabClose(
+                state: state,
+                tabID: tabCloseRequirementTab(requirement).id
+            )
+        }
+        pendingTabCloseSession = PendingTabCloseSession(
+            requirements: refreshedRequirements,
+            originalActiveTabID: originalActiveTabID,
+            retainedTabID: retainedTabID,
+            phase: .processing
+        )
+        try await advancePendingTabCloseSession()
+        tabCloseError = nil
+        return true
+    }
+
+    private func beginPendingTabCloseDecisionResolution() -> Bool {
+        guard pendingTabCloseResolutionCanBegin() else {
+            return false
+        }
+        guard !tabCloseCleanupRequired else {
+            tabCloseError = PhonePadTabCloseActionError
+                .cleanupRequired
+                .localizedDescription
+            return false
+        }
+        guard pendingTabClosePrompt != nil else {
+            tabCloseError = PhonePadTabCloseActionError
+                .noPendingDecision
+                .localizedDescription
+            return false
+        }
+        startPendingTabCloseResolution()
+        return true
+    }
+
+    private func beginPendingTabCloseCleanupResolution() -> Bool {
+        guard pendingTabCloseResolutionCanBegin() else {
+            return false
+        }
+        guard tabCloseCleanupRequired,
+              pendingTabCloseCleanup != nil else {
+            tabCloseError = PhonePadTabCloseActionError
+                .cleanupNotRequired
+                .localizedDescription
+            return false
+        }
+        startPendingTabCloseResolution()
+        return true
+    }
+
+    private func pendingTabCloseResolutionCanBegin() -> Bool {
+        guard pendingTabCloseSession != nil,
+              !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil else {
+            tabCloseError = PhonePadTabCloseActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        return true
+    }
+
+    private func startPendingTabCloseResolution() {
+        activeDocumentTransitionInProgress = true
+        tabTransitionInProgress = true
+        tabCloseError = nil
+    }
+
+    private func advancePendingTabCloseSession() async throws {
+        while let requirement = pendingTabCloseSession?.requirements.first {
+            switch requirement {
+            case let .clean(preparedClose):
+                let closedState = try closePreparedCleanTab(
+                    state: state,
+                    preparedClose: preparedClose,
+                    replacementDocumentID: DocumentID(rawValue: UUID()),
+                    replacementTabID: TabID(rawValue: UUID())
+                )
+                await fileAccessConnector.stopPresenting(
+                    documentID: preparedClose.tab.document.id
+                )
+                state = closedState
+                pendingTabCloseSession?.requirements.removeFirst()
+                pendingTabCloseSession?.phase = .processing
+            case let .unsaved(preparedClose):
+                publishPendingTabClosePrompt(preparedClose: preparedClose)
+                return
+            }
+        }
+
+        try restoreStableTabSelectionForPendingClose()
+        pendingTabCloseSession = nil
+        pendingTabClosePrompt = nil
+        pendingTabCloseCleanup = nil
+        tabCloseCleanupRequired = false
+        tabCloseError = nil
+        presentActiveFileConflictIfNeeded()
+    }
+
+    private func applyDiscardedTabClose(
+        _ result: DiscardedTabCloseResult,
+        requirementIndex: Int
+    ) async throws {
+        await fileAccessConnector.stopPresenting(
+            documentID: result.closedDocumentID
+        )
+        state = result.state
+        clearCheckpointState(closedDocumentID: result.closedDocumentID)
+        pendingTabCloseSession?.requirements.remove(at: requirementIndex)
+        pendingTabCloseSession?.phase = .processing
+        pendingTabClosePrompt = nil
+        pendingTabCloseCleanup = nil
+        tabCloseCleanupRequired = false
+        tabCloseError = nil
+        switch result.notice {
+        case .none:
+            fileSaveNotice = nil
+        case .residualRecoveryCleanupPending:
+            fileSaveNotice = "Protected edits were discarded. Protected cleanup remains and PhonePad will retry it on next recovery access."
+        }
+        try await advancePendingTabCloseSession()
+    }
+
+    private func resumePendingTabCloseAfterSuccessfulSave(
+        documentID: DocumentID
+    ) async -> Bool {
+        guard let requirementIndex = pendingTabCloseRequirementIndex(
+            documentID: documentID
+        ) else {
+            return true
+        }
+        let ownsTabTransition = !fileSaveInProgress
+        if ownsTabTransition {
+            guard !tabTransitionInProgress else {
+                tabCloseError = PhonePadTabCloseActionError
+                    .actionAlreadyInProgress
+                    .localizedDescription
+                return false
+            }
+            activeDocumentTransitionInProgress = true
+            tabTransitionInProgress = true
+        }
+        defer {
+            if ownsTabTransition {
+                finishTabTransition()
+            }
+        }
+
+        do {
+            guard var session = pendingTabCloseSession,
+                  session.requirements.indices.contains(requirementIndex) else {
+                throw PhonePadTabCloseActionError.noPendingDecision
+            }
+            let pendingTabID = tabCloseRequirementTab(
+                session.requirements[requirementIndex]
+            ).id
+            let requirement = try prepareTabClose(
+                state: state,
+                tabID: pendingTabID
+            )
+            guard case .clean = requirement else {
+                throw PhonePadTabCloseActionError.pendingTabRemainsUnsaved
+            }
+            session.requirements[requirementIndex] = requirement
+            session.phase = .processing
+            pendingTabCloseSession = session
+            pendingTabClosePrompt = nil
+            try await advancePendingTabCloseSession()
+            tabCloseError = nil
+            return true
+        } catch {
+            tabCloseError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func publishPendingTabClosePrompt(
+        preparedClose: PreparedUnsavedTabClose
+    ) {
+        let tab = preparedClose.tab
+        pendingTabClosePrompt = PendingTabClosePrompt(
+            tabID: tab.id,
+            documentID: tab.document.id,
+            title: tab.document.title
+        )
+        pendingTabCloseSession?.phase = .decision(tab.id)
+    }
+
+    private func setPendingTabClosePhase(_ phase: PendingTabClosePhase) {
+        pendingTabCloseSession?.phase = phase
+    }
+
+    private func pendingTabCloseRequirementIndex(
+        tabID: TabID
+    ) -> Int? {
+        pendingTabCloseSession?.requirements.firstIndex(where: {
+            tabCloseRequirementTab($0).id == tabID
+        })
+    }
+
+    private func pendingTabCloseRequirementIndex(
+        documentID: DocumentID
+    ) -> Int? {
+        pendingTabCloseSession?.requirements.firstIndex(where: {
+            tabCloseRequirementTab($0).document.id == documentID
+        })
+    }
+
+    private func pendingUnsavedTabClose(
+        at requirementIndex: Int
+    ) -> PreparedUnsavedTabClose? {
+        guard let session = pendingTabCloseSession,
+              session.requirements.indices.contains(requirementIndex),
+              case let .unsaved(preparedClose) = session.requirements[
+                  requirementIndex
+              ] else {
+            return nil
+        }
+        return preparedClose
+    }
+
+    private func refreshPendingUnsavedTabClose(
+        tabID: TabID
+    ) throws -> PreparedUnsavedTabClose {
+        guard var session = pendingTabCloseSession,
+              let requirementIndex = session.requirements.firstIndex(where: {
+                  tabCloseRequirementTab($0).id == tabID
+              }) else {
+            throw PhonePadTabCloseActionError.noPendingDecision
+        }
+        let requirement = try prepareTabClose(
+            state: state,
+            tabID: tabID
+        )
+        guard case let .unsaved(preparedClose) = requirement else {
+            throw PhonePadTabCloseActionError.noPendingDecision
+        }
+        session.requirements[requirementIndex] = requirement
+        pendingTabCloseSession = session
+        return preparedClose
+    }
+
+    private func tabCloseRequirementTab(
+        _ requirement: TabCloseRequirement
+    ) -> PhonePadTab {
+        switch requirement {
+        case let .clean(preparedClose):
+            preparedClose.tab
+        case let .unsaved(preparedClose):
+            preparedClose.tab
+        }
+    }
+
+    private func restoreStableTabSelectionForPendingClose() throws {
+        guard let session = pendingTabCloseSession else {
+            return
+        }
+        let preferredTabID = session.retainedTabID
+            ?? session.originalActiveTabID
+        guard state.tabs.contains(where: { $0.id == preferredTabID }) else {
+            return
+        }
+        state = try PhonePadCore.selectTab(
+            state: state,
+            tabID: preferredTabID
+        )
+    }
+
+    private func cancelPendingTabCloseSessionAfterFailure() {
+        do {
+            try restoreStableTabSelectionForPendingClose()
+        } catch {
+            tabCloseError = error.localizedDescription
+        }
+        pendingTabCloseSession = nil
+        pendingTabClosePrompt = nil
+        pendingTabCloseCleanup = nil
+        tabCloseCleanupRequired = false
+    }
+
+    private func clearCheckpointState(closedDocumentID: DocumentID) {
+        if pendingCheckpoint?.previousState.activeTab.document.id
+            == closedDocumentID {
+            pendingCheckpoint = nil
+        }
+        if failedCheckpoint?.previousState.activeTab.document.id
+            == closedDocumentID {
+            failedCheckpoint = nil
+        }
+        if pendingCheckpoint == nil, failedCheckpoint == nil {
+            recoveryError = nil
+        }
+    }
+
     private func prepareTabTransition() -> Bool {
         guard !tabTransitionInProgress,
               !fileSaveInProgress,
               !fileSaveCleanupRequired,
               pendingSaveAsReplacement == nil,
-              activeRecoveryAction == nil else {
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil else {
             tabTransitionError = PhonePadTabTransitionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1365,7 +2268,8 @@ final class PhonePadAppModel: ObservableObject {
         }
         guard pendingSaveAsReplacement == nil,
               activeRecoveryAction == nil,
-              !activeDocumentTransitionInProgress else {
+              !activeDocumentTransitionInProgress,
+              pendingTabCloseSession == nil else {
             return false
         }
         guard failedCheckpoint == nil else {
@@ -1496,6 +2400,7 @@ final class PhonePadAppModel: ObservableObject {
               !fileSaveInProgress,
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
+              pendingTabCloseSession == nil,
               presenterRefreshPending else {
             return
         }
@@ -1527,6 +2432,11 @@ final class PhonePadAppModel: ObservableObject {
             fileConflictError = nil
             if state.activeTab.document.id == documentID {
                 fileConflictResolutionIsPresented = true
+            }
+            if documentID == pendingTabCloseDocumentID,
+               let tabID = pendingTabCloseCandidateTabID {
+                setPendingTabClosePhase(.fileConflict(tabID))
+                pendingTabClosePrompt = nil
             }
         } catch {
             fileSaveError = error.localizedDescription

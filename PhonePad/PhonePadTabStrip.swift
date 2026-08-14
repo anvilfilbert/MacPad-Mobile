@@ -15,6 +15,8 @@ struct PhonePadTabStrip: View {
     let onSelect: (TabID) -> Void
     let onMove: (TabID, PhonePadCore.TabPlacement) -> Void
     let onMoveError: (Error) -> Void
+    let onClose: (TabID) -> Void
+    let onCloseOthers: (TabID) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -69,6 +71,11 @@ struct PhonePadTabStrip: View {
         tabPosition: Int
     ) -> some View {
         let isActive = tab.id == activeTabID
+        let activeCloseControl = phonePadActiveTabCloseControl(tabID: tab.id)
+        let contextCloseControl = phonePadTabContextCloseControl(tabID: tab.id)
+        let contextCloseOthersControl = phonePadTabContextCloseOtherTabsControl(
+            tabID: tab.id
+        )
         return HStack(spacing: 0) {
             Button {
                 onSelect(tab.id)
@@ -102,6 +109,37 @@ struct PhonePadTabStrip: View {
             .accessibilityLabel(tab.document.title)
             .accessibilityValue(recoveryAccessibilityValue(tab.document.recoveryState))
             .accessibilityAddTraits(isActive ? .isSelected : [])
+            .contextMenu {
+                Button(role: .destructive) {
+                    performPhonePadTabCloseAction(
+                        contextCloseControl.action,
+                        onClose: onClose,
+                        onCloseOthers: onCloseOthers
+                    )
+                } label: {
+                    Label("Close", systemImage: "xmark")
+                }
+                .accessibilityIdentifier(
+                    contextCloseControl.accessibilityIdentifier
+                )
+
+                Button(role: .destructive) {
+                    performPhonePadTabCloseAction(
+                        contextCloseOthersControl.action,
+                        onClose: onClose,
+                        onCloseOthers: onCloseOthers
+                    )
+                } label: {
+                    Label(
+                        "Close Other Tabs",
+                        systemImage: "rectangle.stack.badge.minus"
+                    )
+                }
+                .disabled(tabs.count == 1)
+                .accessibilityIdentifier(
+                    contextCloseOthersControl.accessibilityIdentifier
+                )
+            }
 
             Image(systemName: "line.3.horizontal")
                 .font(.caption.weight(.semibold))
@@ -130,6 +168,28 @@ struct PhonePadTabStrip: View {
                         direction: direction
                     )
                 }
+
+            if isActive {
+                Button {
+                    performPhonePadTabCloseAction(
+                        activeCloseControl.action,
+                        onClose: onClose,
+                        onCloseOthers: onCloseOthers
+                    )
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 44)
+                        .frame(minHeight: interactionHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(
+                    activeCloseControl.accessibilityIdentifier
+                )
+                .accessibilityLabel("Close Tab")
+                .accessibilityValue(tab.document.title)
+            }
         }
         .frame(minHeight: interactionHeight)
         .background(
@@ -232,6 +292,65 @@ struct PhonePadTabStrip: View {
             ? max(28, scaledCapsuleHeight)
             : 28
     }
+}
+
+enum PhonePadTabCloseAction: Equatable, Sendable {
+    case close(TabID)
+    case closeOthers(TabID)
+}
+
+struct PhonePadTabCloseControl: Equatable, Sendable {
+    let action: PhonePadTabCloseAction
+    let accessibilityIdentifier: String
+}
+
+func performPhonePadTabCloseAction(
+    _ action: PhonePadTabCloseAction,
+    onClose: (TabID) -> Void,
+    onCloseOthers: (TabID) -> Void
+) {
+    switch action {
+    case let .close(tabID):
+        onClose(tabID)
+    case let .closeOthers(tabID):
+        onCloseOthers(tabID)
+    }
+}
+
+func phonePadActiveTabCloseControl(tabID: TabID) -> PhonePadTabCloseControl {
+    PhonePadTabCloseControl(
+        action: .close(tabID),
+        accessibilityIdentifier: tabCloseIdentifier(
+            prefix: "phonepad.tab.close",
+            tabID: tabID
+        )
+    )
+}
+
+func phonePadTabContextCloseControl(tabID: TabID) -> PhonePadTabCloseControl {
+    PhonePadTabCloseControl(
+        action: .close(tabID),
+        accessibilityIdentifier: tabCloseIdentifier(
+            prefix: "phonepad.tab.menu.close",
+            tabID: tabID
+        )
+    )
+}
+
+func phonePadTabContextCloseOtherTabsControl(
+    tabID: TabID
+) -> PhonePadTabCloseControl {
+    PhonePadTabCloseControl(
+        action: .closeOthers(tabID),
+        accessibilityIdentifier: tabCloseIdentifier(
+            prefix: "phonepad.tab.close-others",
+            tabID: tabID
+        )
+    )
+}
+
+private func tabCloseIdentifier(prefix: String, tabID: TabID) -> String {
+    "\(prefix).\(tabID.rawValue.uuidString.lowercased())"
 }
 
 func phonePadTabAccessibilityValue(
