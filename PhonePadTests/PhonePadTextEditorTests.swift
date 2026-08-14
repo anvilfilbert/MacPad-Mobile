@@ -6,9 +6,11 @@ import XCTest
 @MainActor
 private final class EditorTestModel: ObservableObject {
     @Published var text: String
+    @Published var isEditable: Bool
 
-    init(text: String) {
+    init(text: String, isEditable: Bool) {
         self.text = text
+        self.isEditable = isEditable
     }
 }
 
@@ -20,6 +22,7 @@ private struct EditorHarness: View {
     var body: some View {
         PhonePadTextEditor(
             text: $model.text,
+            isEditable: model.isEditable,
             transitionController: transitionController
         )
     }
@@ -43,7 +46,7 @@ private enum EditorHarnessError: Error {
 final class PhonePadTextEditorTests: XCTestCase {
     @MainActor
     func testInitialBindingAndInsertPreserveSelectionAndUndoAcrossModelUpdate() throws {
-        let fixture = try makeHostedEditor(text: "abcd")
+        let fixture = try makeHostedEditor(text: "abcd", isEditable: true)
         defer { destroy(fixture) }
 
         XCTAssertEqual(fixture.textView.text, "abcd")
@@ -73,7 +76,7 @@ final class PhonePadTextEditorTests: XCTestCase {
 
     @MainActor
     func testModelUpdateDoesNotOverwriteMarkedText() throws {
-        let fixture = try makeHostedEditor(text: "ab")
+        let fixture = try makeHostedEditor(text: "ab", isEditable: true)
         defer { destroy(fixture) }
 
         fixture.textView.selectedRange = NSRange(location: 2, length: 0)
@@ -125,7 +128,7 @@ final class PhonePadTextEditorTests: XCTestCase {
 
     @MainActor
     func testTransitionCommitSynchronouslyPublishesMarkedTextBeforeDocumentChange() throws {
-        let fixture = try makeHostedEditor(text: "ab")
+        let fixture = try makeHostedEditor(text: "ab", isEditable: true)
         defer { destroy(fixture) }
 
         fixture.textView.selectedRange = NSRange(location: 2, length: 0)
@@ -148,13 +151,50 @@ final class PhonePadTextEditorTests: XCTestCase {
     }
 
     @MainActor
-    private func makeHostedEditor(text: String) throws -> HostedEditor {
+    func testReadOnlyEditorOffersCopyWithoutEditingActions() throws {
+        let fixture = try makeHostedEditor(text: "Copy this text", isEditable: true)
+        defer { destroy(fixture) }
+
+        fixture.model.isEditable = false
+        render(fixture.controller)
+
+        XCTAssertFalse(fixture.textView.isEditable)
+        XCTAssertTrue(fixture.textView.isSelectable)
+        XCTAssertTrue(fixture.textView.isUserInteractionEnabled)
+
+        fixture.textView.selectedRange = NSRange(location: 0, length: 4)
+        XCTAssertEqual(fixture.textView.selectedRange, NSRange(location: 0, length: 4))
+        XCTAssertTrue(
+            fixture.textView.canPerformAction(
+                #selector(UIResponderStandardEditActions.copy(_:)),
+                withSender: nil
+            )
+        )
+        XCTAssertFalse(
+            fixture.textView.canPerformAction(
+                #selector(UIResponderStandardEditActions.cut(_:)),
+                withSender: nil
+            )
+        )
+        XCTAssertFalse(
+            fixture.textView.canPerformAction(
+                #selector(UIResponderStandardEditActions.paste(_:)),
+                withSender: nil
+            )
+        )
+
+        XCTAssertEqual(fixture.textView.text, "Copy this text")
+        XCTAssertEqual(fixture.model.text, "Copy this text")
+    }
+
+    @MainActor
+    private func makeHostedEditor(text: String, isEditable: Bool) throws -> HostedEditor {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
             throw EditorHarnessError.missingForegroundWindowScene
         }
 
-        let model = EditorTestModel(text: text)
+        let model = EditorTestModel(text: text, isEditable: isEditable)
         let transitionController = PhonePadEditorTransitionController()
         let controller = UIHostingController(
             rootView: EditorHarness(

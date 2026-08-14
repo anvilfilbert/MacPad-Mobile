@@ -315,6 +315,75 @@ final class PhonePadAppModelTests: XCTestCase {
         XCTAssertEqual(model.state.activeTab.document.recoveryState, .protectedUnsaved)
     }
 
+    func testFailedCheckpointLocksEditsAndExplicitSaveAsRetriesAfterRepair() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let destinationFolderURL = try makeModelRecoveryRoot()
+        let validationGate = CheckpointValidationGate()
+        let store = FileRecoveryStore(
+            rootURL: recoveryRootURL,
+            fileManager: .default,
+            postPromotionValidation: { promotedURL in
+                try validationGate.validate(promotedURL: promotedURL)
+            }
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .milliseconds(20),
+            checkpointMaximumInterval: .milliseconds(100)
+        )
+        let newestUnprotectedText = "Newest in-memory text\n"
+
+        model.editActiveDocument(text: newestUnprotectedText)
+        try await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertNotNil(model.recoveryError)
+        XCTAssertEqual(model.state.activeTab.document.recoveryState, .checkpointPending)
+        XCTAssertTrue(model.editorMutationDisabled)
+        XCTAssertEqual(validationGate.attemptCount, 1)
+        model.editActiveDocument(text: "Rejected after recovery failure\n")
+        XCTAssertEqual(model.activeText, newestUnprotectedText)
+
+        validationGate.repair()
+        let preparation = try model.prepareDocumentSaveAs(
+            fileName: "Recovered.txt",
+            encoding: .utf8
+        )
+        let returnedPreflight = await model.preflightDocumentSaveAs(
+            preparation: preparation,
+            selectedDirectoryURL: destinationFolderURL
+        )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .ready = preflight.target else {
+            return XCTFail("Absent target must be ready without confirmation.")
+        }
+
+        let didSave = await model.completePreflightedSaveAs(preflight)
+
+        XCTAssertTrue(didSave)
+        XCTAssertNil(model.recoveryError)
+        XCTAssertNil(model.fileSaveError)
+        XCTAssertFalse(model.editorMutationDisabled)
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(model.state.activeTab.document.recoveryState, .clean)
+        XCTAssertEqual(
+            try Data(
+                contentsOf: destinationFolderURL.appendingPathComponent(
+                    "Recovered.txt",
+                    isDirectory: false
+                )
+            ),
+            Data(newestUnprotectedText.utf8)
+        )
+        let remainingRecovery = try await store.load(documentID: documentID)
+        XCTAssertNil(remainingRecovery)
+    }
+
     func testSaveNewDocumentForcesLatestCheckpointAndReturnsCleanBoundFile() async throws {
         let recoveryRootURL = try makeModelRecoveryRoot()
         let destinationFolderURL = try makeModelRecoveryRoot()
@@ -340,15 +409,19 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointMaximumInterval: .seconds(30)
         )
         model.editActiveDocument(text: "Latest\r\ntext")
-        let preparation = try model.prepareNewDocumentSave(
+        let preparation = try model.prepareDocumentSaveAs(
             fileName: "Notes.txt",
             encoding: .utf8
         )
-
-        let didSave = await model.saveNewDocument(
+        let returnedPreflight = await model.preflightDocumentSaveAs(
             preparation: preparation,
-            selectedFolderURL: destinationFolderURL
+            selectedDirectoryURL: destinationFolderURL
         )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .ready = preflight.target else {
+            return XCTFail("Absent target must be ready without confirmation.")
+        }
+        let didSave = await model.completePreflightedSaveAs(preflight)
 
         XCTAssertTrue(didSave)
         XCTAssertEqual(model.state.activeTab.document.title, "Notes.txt")
@@ -371,7 +444,249 @@ final class PhonePadAppModelTests: XCTestCase {
         XCTAssertNil(removedRecovery)
     }
 
-    func testSaveNewDocumentFailureKeepsLatestTextAndRecoveryProtected() async throws {
+    func testSaveAsPreflightPublishesOneReplacementTokenAndCancelIsPure() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let destinationFolderURL = try makeModelRecoveryRoot()
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(rawValue: UUID())
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            newText: "Protected replacement\n",
+            editedAt: Date(timeIntervalSince1970: 1_786_801_200),
+            recoveryStore: store
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        let targetURL = destinationFolderURL.appendingPathComponent(
+            "Existing.txt",
+            isDirectory: false
+        )
+        let originalTargetBytes = Data("Existing owner\n".utf8)
+        try originalTargetBytes.write(to: targetURL, options: .withoutOverwriting)
+        let recoveryBefore = try await store.load(documentID: documentID)
+        let preparation = try model.prepareDocumentSaveAs(
+            fileName: "Existing.txt",
+            encoding: .utf8
+        )
+
+        let preflight = await model.preflightDocumentSaveAs(
+            preparation: preparation,
+            selectedDirectoryURL: destinationFolderURL
+        )
+
+        let replacement = try XCTUnwrap(preflight)
+        guard case .replacementRequired = replacement.target else {
+            return XCTFail("Existing target must publish replacement consent.")
+        }
+        XCTAssertEqual(model.pendingSaveAsReplacement, replacement)
+        XCTAssertEqual(model.state, protectedState)
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalTargetBytes)
+
+        model.cancelSaveAsReplacement()
+
+        let recoveryAfter = try await store.load(documentID: documentID)
+        XCTAssertNil(model.pendingSaveAsReplacement)
+        XCTAssertEqual(model.state, protectedState)
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalTargetBytes)
+        XCTAssertEqual(recoveryAfter, recoveryBefore)
+    }
+
+    func testCurrentFileSaveAsCommitsSelectedEncodingWithoutReplacementToken() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let filesURL = try makeModelRecoveryRoot()
+        let sourceURL = filesURL.appendingPathComponent(
+            "Current.txt",
+            isDirectory: false
+        )
+        try Data("Original\r\n".utf8).write(
+            to: sourceURL,
+            options: .withoutOverwriting
+        )
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let model = PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .milliseconds(20),
+            checkpointMaximumInterval: .milliseconds(100)
+        )
+        let didOpen = await model.openDocument(selectedURL: sourceURL)
+        XCTAssertTrue(didOpen)
+        model.editActiveDocument(text: "Selected\nencoding\n")
+        let preparation = try model.prepareDocumentSaveAs(
+            fileName: "Current.txt",
+            encoding: .utf16BigEndianWithBOM
+        )
+        let returnedPreflight = await model.preflightDocumentSaveAs(
+            preparation: preparation,
+            selectedDirectoryURL: filesURL
+        )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .currentFile = preflight.target else {
+            return XCTFail("Current target must route without replacement consent.")
+        }
+
+        let didSave = await model.completePreflightedSaveAs(preflight)
+
+        XCTAssertTrue(didSave)
+        XCTAssertNil(model.pendingSaveAsReplacement)
+        XCTAssertNil(model.fileSaveError)
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            model.state.activeTab.document.fileBinding?.encoding,
+            .utf16BigEndianWithBOM
+        )
+        XCTAssertEqual(
+            model.state.activeTab.document.fileBinding?.lineEnding,
+            .crlf
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: sourceURL),
+            Data([
+                0xfe, 0xff,
+                0x00, 0x53, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x65,
+                0x00, 0x63, 0x00, 0x74, 0x00, 0x65, 0x00, 0x64,
+                0x00, 0x0d, 0x00, 0x0a,
+                0x00, 0x65, 0x00, 0x6e, 0x00, 0x63, 0x00, 0x6f,
+                0x00, 0x64, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x67,
+                0x00, 0x0d, 0x00, 0x0a,
+            ])
+        )
+    }
+
+    func testConfirmedSaveAsReplacementClearsDecisionAfterTargetRace() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let filesURL = try makeModelRecoveryRoot()
+        let targetURL = filesURL.appendingPathComponent(
+            "Race.txt",
+            isDirectory: false
+        )
+        try Data("Initial owner\n".utf8).write(
+            to: targetURL,
+            options: .withoutOverwriting
+        )
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(rawValue: UUID())
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            newText: "PhonePad replacement\n",
+            editedAt: Date(timeIntervalSince1970: 1_786_801_300),
+            recoveryStore: store
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        let preparation = try model.prepareDocumentSaveAs(
+            fileName: "Race.txt",
+            encoding: .utf8
+        )
+        let returnedPreflight = await model.preflightDocumentSaveAs(
+            preparation: preparation,
+            selectedDirectoryURL: filesURL
+        )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .replacementRequired = preflight.target else {
+            return XCTFail("Existing target must require replacement consent.")
+        }
+        let racedBytes = Data("External change\n".utf8)
+        try racedBytes.write(to: targetURL, options: .atomic)
+
+        let didSave = await model.confirmReplacementAndCompleteSaveAs()
+
+        XCTAssertFalse(didSave)
+        XCTAssertNil(model.pendingSaveAsReplacement)
+        XCTAssertNotNil(model.fileSaveError)
+        XCTAssertEqual(try Data(contentsOf: targetURL), racedBytes)
+        XCTAssertTrue(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(model.state.activeTab.document.recoveryState, .protectedUnsaved)
+        let recovery = try await store.load(documentID: documentID)
+        XCTAssertEqual(recovery?.text, "PhonePad replacement\n")
+        XCTAssertEqual(
+            recovery?.pendingSave?.destination,
+            .saveAs(
+                RecoverySaveAsDestination(
+                    directoryBookmark: preflight.target.plan.directoryBookmark,
+                    fileName: preflight.target.plan.fileName
+                )
+            )
+        )
+    }
+
+    func testConfirmedSaveAsReplacementCommitsAndTerminatesRecovery() async throws {
+        let recoveryRootURL = try makeModelRecoveryRoot()
+        let filesURL = try makeModelRecoveryRoot()
+        let targetURL = filesURL.appendingPathComponent(
+            "Replace.txt",
+            isDirectory: false
+        )
+        try Data("Existing\n".utf8).write(
+            to: targetURL,
+            options: .withoutOverwriting
+        )
+        let store = FileRecoveryStore(rootURL: recoveryRootURL, fileManager: .default)
+        let documentID = DocumentID(rawValue: UUID())
+        let protectedState = try await editActiveDocumentAndCheckpoint(
+            state: makeInitialPhonePadState(
+                documentID: documentID,
+                tabID: TabID(rawValue: UUID())
+            ),
+            newText: "Confirmed replacement\n",
+            editedAt: Date(timeIntervalSince1970: 1_786_801_400),
+            recoveryStore: store
+        )
+        let model = PhonePadAppModel(
+            state: protectedState,
+            recoveryStore: store,
+            fileAccessConnector: FileAccessConnector(fileManager: .default),
+            checkpointQuietPeriod: .seconds(30),
+            checkpointMaximumInterval: .seconds(30)
+        )
+        let preparation = try model.prepareDocumentSaveAs(
+            fileName: "Replace.txt",
+            encoding: .utf8WithBOM
+        )
+        let returnedPreflight = await model.preflightDocumentSaveAs(
+            preparation: preparation,
+            selectedDirectoryURL: filesURL
+        )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .replacementRequired = preflight.target else {
+            return XCTFail("Existing target must require replacement consent.")
+        }
+
+        let didSave = await model.confirmReplacementAndCompleteSaveAs()
+
+        XCTAssertTrue(didSave)
+        XCTAssertNil(model.pendingSaveAsReplacement)
+        XCTAssertNil(model.fileSaveError)
+        XCTAssertFalse(model.state.activeTab.document.isUnsaved)
+        XCTAssertEqual(
+            try Data(contentsOf: targetURL),
+            Data([0xef, 0xbb, 0xbf]) + Data("Confirmed replacement\n".utf8)
+        )
+        let remainingRecovery = try await store.load(documentID: documentID)
+        XCTAssertNil(remainingRecovery)
+    }
+
+    func testExistingSaveAsTargetWaitsForExplicitReplacement() async throws {
         let recoveryRootURL = try makeModelRecoveryRoot()
         let destinationFolderURL = try makeModelRecoveryRoot()
         let targetURL = destinationFolderURL.appendingPathComponent(
@@ -398,21 +713,24 @@ final class PhonePadAppModelTests: XCTestCase {
             state: protectedState,
             recoveryStore: store,
             fileAccessConnector: FileAccessConnector(fileManager: .default),
-            checkpointQuietPeriod: .seconds(30),
-            checkpointMaximumInterval: .seconds(30)
+            checkpointQuietPeriod: .milliseconds(20),
+            checkpointMaximumInterval: .milliseconds(100)
         )
         model.editActiveDocument(text: "Latest protected text")
-        let preparation = try model.prepareNewDocumentSave(
+        try await Task.sleep(for: .milliseconds(250))
+        let preparation = try model.prepareDocumentSaveAs(
             fileName: "Existing.txt",
             encoding: .utf8
         )
-
-        let didSave = await model.saveNewDocument(
+        let returnedPreflight = await model.preflightDocumentSaveAs(
             preparation: preparation,
-            selectedFolderURL: destinationFolderURL
+            selectedDirectoryURL: destinationFolderURL
         )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .replacementRequired = preflight.target else {
+            return XCTFail("Existing target must require explicit replacement.")
+        }
 
-        XCTAssertFalse(didSave)
         XCTAssertEqual(model.state.activeTab.document.text, "Latest protected text")
         XCTAssertTrue(model.state.activeTab.document.isUnsaved)
         XCTAssertEqual(
@@ -420,12 +738,14 @@ final class PhonePadAppModelTests: XCTestCase {
             DocumentRecoveryState.protectedUnsaved
         )
         XCTAssertNil(model.state.activeTab.document.fileBinding)
-        XCTAssertNotNil(model.fileSaveError)
+        XCTAssertNil(model.fileSaveError)
         XCTAssertNil(model.fileSaveNotice)
         XCTAssertFalse(model.fileSaveInProgress)
+        XCTAssertEqual(model.pendingSaveAsReplacement, preflight)
         XCTAssertEqual(try Data(contentsOf: targetURL), originalBytes)
         let envelope = try await store.load(documentID: documentID)
         XCTAssertEqual(envelope?.text, "Latest protected text")
+        XCTAssertNil(envelope?.pendingSave)
     }
 
     func testVerifiedSaveCleanupFailureBlocksMutationUntilRetrySucceeds() async throws {
@@ -454,10 +774,13 @@ final class PhonePadAppModelTests: XCTestCase {
         let connector = FileAccessConnector(
             fileManager: .default,
             bookmarkCreator: { targetURL in
-                try Data("corrupt recovery".utf8).write(
-                    to: recoveryArtifactURL,
-                    options: .atomic
-                )
+                if targetURL.standardizedFileURL
+                    != destinationFolderURL.standardizedFileURL {
+                    try Data("corrupt recovery".utf8).write(
+                        to: recoveryArtifactURL,
+                        options: .atomic
+                    )
+                }
                 return try targetURL.bookmarkData(
                     options: [],
                     includingResourceValuesForKeys: nil,
@@ -472,15 +795,19 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointQuietPeriod: .seconds(30),
             checkpointMaximumInterval: .seconds(30)
         )
-        let preparation = try model.prepareNewDocumentSave(
+        let preparation = try model.prepareDocumentSaveAs(
             fileName: "Verified.txt",
             encoding: .utf8
         )
-
-        let didSave = await model.saveNewDocument(
+        let returnedPreflight = await model.preflightDocumentSaveAs(
             preparation: preparation,
-            selectedFolderURL: destinationFolderURL
+            selectedDirectoryURL: destinationFolderURL
         )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .ready = preflight.target else {
+            return XCTFail("Absent target must be ready without confirmation.")
+        }
+        let didSave = await model.completePreflightedSaveAs(preflight)
 
         XCTAssertFalse(didSave)
         XCTAssertTrue(model.fileSaveCleanupRequired)
@@ -551,7 +878,15 @@ final class PhonePadAppModelTests: XCTestCase {
         let connector = FileAccessConnector(
             fileManager: .default,
             bookmarkCreator: { targetURL in
-                try gate.createBookmark(afterEnteringFor: targetURL)
+                if targetURL.standardizedFileURL
+                    == destinationFolderURL.standardizedFileURL {
+                    return try targetURL.bookmarkData(
+                        options: [],
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil
+                    )
+                }
+                return try gate.createBookmark(afterEnteringFor: targetURL)
             }
         )
         let model = PhonePadAppModel(
@@ -561,16 +896,21 @@ final class PhonePadAppModelTests: XCTestCase {
             checkpointQuietPeriod: .seconds(30),
             checkpointMaximumInterval: .seconds(30)
         )
-        let preparation = try model.prepareNewDocumentSave(
+        let preparation = try model.prepareDocumentSaveAs(
             fileName: "InFlight.txt",
             encoding: .utf8
         )
+        let returnedPreflight = await model.preflightDocumentSaveAs(
+            preparation: preparation,
+            selectedDirectoryURL: destinationFolderURL
+        )
+        let preflight = try XCTUnwrap(returnedPreflight)
+        guard case .ready = preflight.target else {
+            return XCTFail("Absent target must be ready without confirmation.")
+        }
 
         let saveTask = Task { @MainActor in
-            await model.saveNewDocument(
-                preparation: preparation,
-                selectedFolderURL: destinationFolderURL
-            )
+            await model.completePreflightedSaveAs(preflight)
         }
         await gate.waitUntilEntered()
 
@@ -815,6 +1155,33 @@ private final class BlockingBookmarkGate: @unchecked Sendable {
 
     func resume() {
         release.signal()
+    }
+}
+
+private final class CheckpointValidationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFail: Bool = true
+    private var recordedAttemptCount: Int = 0
+
+    var attemptCount: Int {
+        lock.withLock { recordedAttemptCount }
+    }
+
+    func validate(promotedURL _: URL) throws {
+        let mustFail = lock.withLock {
+            recordedAttemptCount += 1
+            return shouldFail
+        }
+        guard mustFail else {
+            return
+        }
+        throw CocoaError(.fileWriteUnknown)
+    }
+
+    func repair() {
+        lock.withLock {
+            shouldFail = false
+        }
     }
 }
 

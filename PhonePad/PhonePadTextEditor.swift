@@ -39,13 +39,16 @@ enum PhonePadEditorTransitionError: Error, LocalizedError {
 
 struct PhonePadTextEditor: UIViewRepresentable {
     @Binding private var text: String
+    private let isEditable: Bool
     private let transitionController: PhonePadEditorTransitionController
 
     init(
         text: Binding<String>,
+        isEditable: Bool,
         transitionController: PhonePadEditorTransitionController
     ) {
         _text = text
+        self.isEditable = isEditable
         self.transitionController = transitionController
     }
 
@@ -57,6 +60,8 @@ struct PhonePadTextEditor: UIViewRepresentable {
         let textView = UITextView()
         textView.delegate = context.coordinator
         textView.text = text
+        textView.isEditable = isEditable
+        textView.isSelectable = true
         textView.font = UIFont.preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
         textView.backgroundColor = .systemBackground
@@ -74,6 +79,8 @@ struct PhonePadTextEditor: UIViewRepresentable {
 
     func updateUIView(_ textView: UITextView, context: Context) {
         context.coordinator.update(text: $text)
+        textView.isEditable = isEditable
+        textView.isSelectable = true
 
         if textView.markedTextRange != nil {
             context.coordinator.deferModelText(text, displayedText: textView.text ?? "")

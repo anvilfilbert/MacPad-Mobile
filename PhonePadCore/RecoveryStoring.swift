@@ -41,6 +41,9 @@ public protocol RecoveryStoring: Sendable {
     func load(documentID: DocumentID) async throws -> RecoveryEnvelope?
     func verifyCheckpoint(documentID: DocumentID) async throws -> RecoveryCheckpointVerification
     func recoveryItems() async throws -> [RecoveryItemSummary]
+    func recoveryFileCollisionClaims(
+        excludingDocumentID: DocumentID
+    ) async throws -> [FileCollisionClaim]
     @discardableResult
     func discardRecovery(documentID: DocumentID) async throws -> RecoveryTerminalOutcome
 

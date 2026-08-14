@@ -33,9 +33,14 @@
 		C00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */; };
 		C0000000000000000000001A /* TextFileCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001A /* TextFileCodec.swift */; };
 		C0000000000000000000001B /* TextFileCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001B /* TextFileCodecTests.swift */; };
+		C0000000000000000000001C /* PhonePadSaveAsWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001C /* PhonePadSaveAsWorkflow.swift */; };
+		C0000000000000000000001D /* PhonePadSaveAsWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001D /* PhonePadSaveAsWorkflowTests.swift */; };
+		C0000000000000000000001E /* SaveAsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001E /* SaveAsModels.swift */; };
+		C0000000000000000000001F /* SaveAsModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001F /* SaveAsModelsTests.swift */; };
 		C00000000000000000000020 /* PhonePadCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; };
 		C00000000000000000000021 /* PhonePadCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		C00000000000000000000022 /* PhonePadCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000042 /* PhonePadCore.framework */; };
+		C00000000000000000000023 /* RecoveryPendingSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000029 /* RecoveryPendingSaveTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -117,6 +122,10 @@
 		B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadBoundFileWorkflowTests.swift; sourceTree = "<group>"; };
 		B0000000000000000000001A /* TextFileCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextFileCodec.swift; sourceTree = "<group>"; };
 		B0000000000000000000001B /* TextFileCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextFileCodecTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000001C /* PhonePadSaveAsWorkflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadSaveAsWorkflow.swift; sourceTree = "<group>"; };
+		B0000000000000000000001D /* PhonePadSaveAsWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadSaveAsWorkflowTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000001E /* SaveAsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveAsModels.swift; sourceTree = "<group>"; };
+		B0000000000000000000001F /* SaveAsModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveAsModelsTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000020 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
 		B00000000000000000000021 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		B00000000000000000000022 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
@@ -126,6 +135,7 @@
 		B00000000000000000000026 /* PhonePadUITests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = PhonePadUITests.xcconfig; sourceTree = "<group>"; };
 		B00000000000000000000027 /* ExternalOpenHost.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ExternalOpenHost.xcconfig; sourceTree = "<group>"; };
 		B00000000000000000000028 /* PhonePad-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "PhonePad-Info.plist"; sourceTree = "<group>"; };
+		B00000000000000000000029 /* RecoveryPendingSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryPendingSaveTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -224,6 +234,7 @@
 				B00000000000000000000001 /* PhonePadApp.swift */,
 				B00000000000000000000002 /* PhonePadRootView.swift */,
 				B00000000000000000000003 /* PhonePadAppModel.swift */,
+				B0000000000000000000001C /* PhonePadSaveAsWorkflow.swift */,
 				B00000000000000000000015 /* PhonePadSaveWorkflow.swift */,
 				B00000000000000000000004 /* PhonePadWorkflow.swift */,
 				B00000000000000000000005 /* FileRecoveryStore.swift */,
@@ -236,6 +247,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000011 /* FileModels.swift */,
+				B0000000000000000000001E /* SaveAsModels.swift */,
 				B0000000000000000000001A /* TextFileCodec.swift */,
 				B00000000000000000000007 /* PhonePadState.swift */,
 				B00000000000000000000008 /* RecoveryEnvelope.swift */,
@@ -253,7 +265,10 @@
 				B00000000000000000000010 /* FileRecoveryStoreRecoveryItemsTests.swift */,
 				B0000000000000000000000E /* PhonePadAppModelTests.swift */,
 				B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */,
+				B0000000000000000000001D /* PhonePadSaveAsWorkflowTests.swift */,
 				B00000000000000000000016 /* PhonePadSaveWorkflowTests.swift */,
+				B00000000000000000000029 /* RecoveryPendingSaveTests.swift */,
+				B0000000000000000000001F /* SaveAsModelsTests.swift */,
 				B0000000000000000000000A /* PhonePadWorkflowTests.swift */,
 				B0000000000000000000000B /* PhonePadTextEditorTests.swift */,
 			);
@@ -480,6 +495,7 @@
 				C00000000000000000000001 /* PhonePadApp.swift in Sources */,
 				C00000000000000000000002 /* PhonePadRootView.swift in Sources */,
 				C00000000000000000000003 /* PhonePadAppModel.swift in Sources */,
+				C0000000000000000000001C /* PhonePadSaveAsWorkflow.swift in Sources */,
 				C00000000000000000000015 /* PhonePadSaveWorkflow.swift in Sources */,
 				C00000000000000000000004 /* PhonePadWorkflow.swift in Sources */,
 				C00000000000000000000005 /* FileRecoveryStore.swift in Sources */,
@@ -492,6 +508,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000011 /* FileModels.swift in Sources */,
+				C0000000000000000000001E /* SaveAsModels.swift in Sources */,
 				C0000000000000000000001A /* TextFileCodec.swift in Sources */,
 				C00000000000000000000007 /* PhonePadState.swift in Sources */,
 				C00000000000000000000008 /* RecoveryEnvelope.swift in Sources */,
@@ -509,7 +526,10 @@
 				C00000000000000000000010 /* FileRecoveryStoreRecoveryItemsTests.swift in Sources */,
 				C0000000000000000000000E /* PhonePadAppModelTests.swift in Sources */,
 				C00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift in Sources */,
+				C0000000000000000000001D /* PhonePadSaveAsWorkflowTests.swift in Sources */,
 				C00000000000000000000016 /* PhonePadSaveWorkflowTests.swift in Sources */,
+				C00000000000000000000023 /* RecoveryPendingSaveTests.swift in Sources */,
+				C0000000000000000000001F /* SaveAsModelsTests.swift in Sources */,
 				C0000000000000000000000A /* PhonePadWorkflowTests.swift in Sources */,
 				C0000000000000000000000B /* PhonePadTextEditorTests.swift in Sources */,
 			);

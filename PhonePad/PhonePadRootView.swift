@@ -60,7 +60,7 @@ struct PhonePadRootView: View {
     @State private var saveAsIsPresented: Bool
     @State private var saveAsFileName: String
     @State private var saveAsEncoding: TextFileEncoding
-    @State private var preparedNewFileSave: PreparedNewFileSave?
+    @State private var preparedSaveAs: PreparedSaveAs?
     @State private var folderPickerIsPresented: Bool
     @State private var saveAsValidationError: String?
     @State private var filePickerIsPresented: Bool
@@ -74,7 +74,7 @@ struct PhonePadRootView: View {
         saveAsIsPresented = false
         saveAsFileName = "Untitled.txt"
         saveAsEncoding = .utf8
-        preparedNewFileSave = nil
+        preparedSaveAs = nil
         folderPickerIsPresented = false
         saveAsValidationError = nil
         filePickerIsPresented = false
@@ -91,6 +91,7 @@ struct PhonePadRootView: View {
                         get: { model.activeText },
                         set: { model.editActiveDocument(text: $0) }
                     ),
+                    isEditable: !model.editorMutationDisabled,
                     transitionController: editorTransitionController
                 )
                 .disabled(model.fileMutationDisabled)
@@ -122,7 +123,7 @@ struct PhonePadRootView: View {
         .sheet(isPresented: $recoveryIsPresented) {
             recoverySheet
         }
-        .sheet(isPresented: $saveAsIsPresented) {
+        .sheet(isPresented: $saveAsIsPresented, onDismiss: resetSaveAsPresentation) {
             saveAsSheet
         }
         .sheet(isPresented: $filePickerIsPresented) {
@@ -152,6 +153,13 @@ struct PhonePadRootView: View {
                 Label("Save", systemImage: "square.and.arrow.down")
             }
             .accessibilityIdentifier("phonepad.action-menu.save")
+
+            Button {
+                presentExplicitSaveAs()
+            } label: {
+                Label("Save As", systemImage: "doc.badge.plus")
+            }
+            .accessibilityIdentifier("phonepad.action-menu.save-as")
 
             Button {
                 recoveryIsPresented = true
@@ -186,7 +194,7 @@ struct PhonePadRootView: View {
     private var saveAsSheet: some View {
         NavigationStack {
             Form {
-                Section("New File") {
+                Section("File") {
                     TextField("File Name", text: $saveAsFileName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -272,7 +280,7 @@ struct PhonePadRootView: View {
                         cancelSaveAs()
                     }
                     .disabled(model.fileMutationDisabled)
-                    .accessibilityIdentifier("phonepad.save-as.cancel")
+                    .accessibilityIdentifier("phonepad.save-as.configuration-cancel")
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
@@ -294,7 +302,9 @@ struct PhonePadRootView: View {
                 onCancellation: cancelFolderPicker,
                 onFailure: failFolderPicker
             )
-            .accessibilityIdentifier("phonepad.save-as.folder-picker")
+        }
+        .sheet(isPresented: replacementConfirmationIsPresented) {
+            replacementConfirmationSheet
         }
     }
 
@@ -392,15 +402,31 @@ struct PhonePadRootView: View {
         }
     }
 
+    private func presentExplicitSaveAs() {
+        model.clearFileSaveFeedback()
+        fileAction = .save
+        do {
+            try editorTransitionController.commitMarkedText()
+        } catch {
+            model.reportFileSaveTransitionError(error)
+            return
+        }
+        presentSaveAsAfterEditorCommit()
+    }
+
     private func presentSaveAsAfterEditorCommit() {
         saveAsFileName = suggestedFileName()
-        saveAsEncoding = .utf8
-        preparedNewFileSave = nil
+        saveAsEncoding = model.state.activeTab.document.fileBinding?.encoding ?? .utf8
+        preparedSaveAs = nil
+        model.cancelSaveAsReplacement()
         saveAsValidationError = nil
         saveAsIsPresented = true
     }
 
     private func suggestedFileName() -> String {
+        if let binding = model.state.activeTab.document.fileBinding {
+            return binding.displayName.value
+        }
         let title = model.state.activeTab.document.title
         if title.lowercased().hasSuffix(".txt") {
             return title
@@ -411,21 +437,21 @@ struct PhonePadRootView: View {
     private func chooseSaveFolder() {
         model.clearFileSaveFeedback()
         do {
-            preparedNewFileSave = try model.prepareNewDocumentSave(
+            preparedSaveAs = try model.prepareDocumentSaveAs(
                 fileName: saveAsFileName,
                 encoding: saveAsEncoding
             )
             saveAsValidationError = nil
             folderPickerIsPresented = true
         } catch {
-            preparedNewFileSave = nil
+            preparedSaveAs = nil
             saveAsValidationError = error.localizedDescription
         }
     }
 
-    private func selectSaveFolder(_ selectedFolderURL: URL) {
+    private func selectSaveFolder(_ selectedDirectoryURL: URL) {
         folderPickerIsPresented = false
-        guard let preparedNewFileSave else {
+        guard let preparedSaveAs else {
             model.reportFileSaveTransitionError(
                 PhonePadSaveAsPresentationError.missingPreparation
             )
@@ -433,35 +459,123 @@ struct PhonePadRootView: View {
         }
 
         Task { @MainActor in
-            let saved = await model.saveNewDocument(
-                preparation: preparedNewFileSave,
-                selectedFolderURL: selectedFolderURL
+            let preflight = await model.preflightDocumentSaveAs(
+                preparation: preparedSaveAs,
+                selectedDirectoryURL: selectedDirectoryURL
             )
-            guard saved else {
+            self.preparedSaveAs = nil
+            guard let preflight else {
                 return
             }
-            self.preparedNewFileSave = nil
-            saveAsValidationError = nil
-            saveAsIsPresented = false
+            switch preflight.target {
+            case .replacementRequired:
+                return
+            case .ready, .currentFile:
+                let saved = await model.completePreflightedSaveAs(preflight)
+                guard saved else {
+                    return
+                }
+                saveAsValidationError = nil
+                saveAsIsPresented = false
+            }
         }
     }
 
     private func cancelFolderPicker() {
         folderPickerIsPresented = false
+        preparedSaveAs = nil
     }
 
     private func failFolderPicker(_ error: Error) {
         folderPickerIsPresented = false
+        preparedSaveAs = nil
         model.reportFileSaveTransitionError(error)
     }
 
     private func cancelSaveAs() {
         model.clearFileSaveFeedback()
+        model.cancelSaveAsReplacement()
         fileAction = nil
-        preparedNewFileSave = nil
+        preparedSaveAs = nil
         saveAsValidationError = nil
         folderPickerIsPresented = false
         saveAsIsPresented = false
+    }
+
+    private var replacementConfirmationIsPresented: Binding<Bool> {
+        Binding(
+            get: { model.pendingSaveAsReplacement != nil },
+            set: { isPresented in
+                if !isPresented {
+                    model.cancelSaveAsReplacement()
+                }
+            }
+        )
+    }
+
+    private var replacementConfirmationSheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Label("Replace Existing File?", systemImage: "exclamationmark.triangle.fill")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.red)
+
+                Text(model.pendingSaveAsReplacement?.target.plan.fileName.value ?? "")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("phonepad.save-as.replace-target")
+
+                Spacer()
+
+                Button("Replace", role: .destructive) {
+                    confirmSaveAsReplacement()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .frame(maxWidth: .infinity)
+                .disabled(model.fileSaveInProgress)
+                .accessibilityIdentifier("phonepad.save-as.replace")
+
+                Button("Cancel", role: .cancel) {
+                    cancelSaveAsReplacement()
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+                .disabled(model.fileSaveInProgress)
+                .accessibilityIdentifier("phonepad.save-as.cancel")
+            }
+            .padding()
+            .navigationTitle("Confirm Replace")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("phonepad.save-as.replace-confirmation")
+        .interactiveDismissDisabled(model.fileSaveInProgress)
+        .presentationDetents([.medium])
+    }
+
+    private func confirmSaveAsReplacement() {
+        Task { @MainActor in
+            let saved = await model.confirmReplacementAndCompleteSaveAs()
+            preparedSaveAs = nil
+            guard saved else {
+                return
+            }
+            saveAsValidationError = nil
+            saveAsIsPresented = false
+        }
+    }
+
+    private func cancelSaveAsReplacement() {
+        model.cancelSaveAsReplacement()
+        preparedSaveAs = nil
+    }
+
+    private func resetSaveAsPresentation() {
+        model.cancelSaveAsReplacement()
+        preparedSaveAs = nil
+        saveAsValidationError = nil
+        folderPickerIsPresented = false
+        fileAction = nil
     }
 
     private func retrySaveCleanupFromSheet() {
@@ -470,7 +584,7 @@ struct PhonePadRootView: View {
             guard cleanupCompleted else {
                 return
             }
-            preparedNewFileSave = nil
+            preparedSaveAs = nil
             saveAsValidationError = nil
             saveAsIsPresented = false
         }

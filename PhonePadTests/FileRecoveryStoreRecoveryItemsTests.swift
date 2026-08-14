@@ -178,6 +178,138 @@ final class FileRecoveryStoreRecoveryItemsTests: XCTestCase {
         XCTAssertFalse(serializedText.contains("file://"))
     }
 
+    func testRecoveryFileCollisionClaimsExposeBoundAndPendingSaveAsTargets() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(uuidString: "15700000-0000-0000-0000-000000000001")!
+        )
+        let excludedDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "15700000-0000-0000-0000-000000000002")!
+        )
+        let fileReference = RecoveryFileReference(
+            bookmark: try FileBookmark(data: Data("bound-file-bookmark".utf8)),
+            identity: nil,
+            displayName: try ValidatedFileName(validating: "Bound.txt"),
+            cleanDigest: try FileDigest(bytes: Data(repeating: 0x31, count: 32)),
+            encoding: .utf8,
+            lineEnding: .lf
+        )
+        let collisionReference = FileCollisionReference(
+            bookmark: fileReference.bookmark,
+            identity: fileReference.identity
+        )
+        let saveAsDestination = RecoverySaveAsDestination(
+            directoryBookmark: try FileBookmark(
+                data: Data("destination-directory-bookmark".utf8)
+            ),
+            fileName: try ValidatedFileName(validating: "Replacement.txt")
+        )
+        let pendingSave = RecoveryPendingSave(
+            intendedOutputDigest: try FileDigest(
+                bytes: Data(repeating: 0x32, count: 32)
+            ),
+            destination: .saveAs(saveAsDestination)
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        for storedDocumentID in [documentID, excludedDocumentID] {
+            try await store.save(
+                envelope: try RecoveryEnvelope(
+                    formatVersion: RecoveryEnvelope.currentFormatVersion,
+                    documentID: storedDocumentID,
+                    title: "Private recovery title",
+                    text: "Private recovery text",
+                    editedAt: Date(timeIntervalSince1970: 1_786_650_057),
+                    fileReference: fileReference,
+                    pendingSave: pendingSave
+                )
+            )
+        }
+
+        let claims = try await store.recoveryFileCollisionClaims(
+            excludingDocumentID: excludedDocumentID
+        )
+
+        XCTAssertEqual(claims.count, 2)
+        XCTAssertTrue(
+            claims.contains(
+                .recoveryItem(
+                    documentID: documentID,
+                    reference: collisionReference
+                )
+            )
+        )
+        XCTAssertTrue(
+            claims.contains(
+                .pendingSaveAs(
+                    documentID: documentID,
+                    destination: saveAsDestination
+                )
+            )
+        )
+    }
+
+    func testRecoveryFileCollisionClaimsFailClosedWhenAnyRecoveryIsCorrupt() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let validDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "15800000-0000-0000-0000-000000000001")!
+        )
+        let corruptDocumentID = DocumentID(
+            rawValue: UUID(uuidString: "15800000-0000-0000-0000-000000000002")!
+        )
+        let fileReference = RecoveryFileReference(
+            bookmark: try FileBookmark(data: Data("valid-bookmark".utf8)),
+            identity: FileIdentity(
+                volumeUUID: UUID(uuidString: "15800000-0000-0000-0000-000000000003")!,
+                documentIdentifier: 158
+            ),
+            displayName: try ValidatedFileName(validating: "Valid.txt"),
+            cleanDigest: try FileDigest(bytes: Data(repeating: 0x41, count: 32)),
+            encoding: .utf8,
+            lineEnding: .lf
+        )
+        let store = FileRecoveryStore(rootURL: rootURL, fileManager: .default)
+        try await store.save(
+            envelope: try RecoveryEnvelope(
+                formatVersion: RecoveryEnvelope.currentFormatVersion,
+                documentID: validDocumentID,
+                title: "Valid",
+                text: "Valid recovery text",
+                editedAt: Date(timeIntervalSince1970: 1_786_650_058),
+                fileReference: fileReference,
+                pendingSave: nil
+            )
+        )
+        let corruptURL = canonicalURL(
+            rootURL: rootURL,
+            documentID: corruptDocumentID
+        )
+        try Data("not-json".utf8).write(
+            to: corruptURL,
+            options: [.atomic, .completeFileProtection]
+        )
+        try applyProtectedMetadata(to: corruptURL)
+
+        do {
+            _ = try await store.recoveryFileCollisionClaims(
+                excludingDocumentID: DocumentID(rawValue: UUID())
+            )
+            XCTFail("Expected corrupt recovery metadata to block collision inventory.")
+        } catch let error as FileRecoveryStoreError {
+            guard case .couldNotDecodeCheckpoint = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains(rootURL.path))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let retainedValidEnvelope = try await store.load(
+            documentID: validDocumentID
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: corruptURL.path))
+        XCTAssertNotNil(retainedValidEnvelope)
+    }
+
     func testRecoveryItemsClassifiesAndRetainsEnvelopeWithOversizedMetadata() async throws {
         let rootURL = try makeRecoveryRoot()
         let documentID = DocumentID(

@@ -196,10 +196,47 @@ final class PhonePadLaunchUITests: XCTestCase {
         XCTAssertTrue(validationError.waitForExistence(timeout: 2))
         XCTAssertTrue(saveAsSheet.exists)
 
-        let cancelButton = app.buttons["phonepad.save-as.cancel"]
+        let cancelButton = app.buttons["phonepad.save-as.configuration-cancel"]
         XCTAssertTrue(cancelButton.waitForExistence(timeout: 2))
         cancelButton.tap()
         XCTAssertFalse(saveAsSheet.exists)
+    }
+
+    @MainActor
+    func testExplicitSaveAsUsesStableConfigurationAndFolderPickerIdentifiers() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let actionMenu = app.descendants(matching: .any)["phonepad.action-menu"].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.tap()
+
+        let saveAsAction = app.buttons["phonepad.action-menu.save-as"]
+        XCTAssertTrue(saveAsAction.waitForExistence(timeout: 2))
+        saveAsAction.tap()
+
+        let saveAsSheet = app.descendants(matching: .any)["phonepad.save-as.sheet"]
+            .firstMatch
+        XCTAssertTrue(saveAsSheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.textFields["phonepad.save-as.filename"].waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.save-as.encoding"]
+                .firstMatch
+                .waitForExistence(timeout: 2)
+        )
+        let chooseFolder = app.buttons["phonepad.save-as.choose-folder"]
+        XCTAssertTrue(chooseFolder.waitForExistence(timeout: 2))
+        chooseFolder.tap()
+
+        let folderPicker = app.descendants(matching: .any)[
+            "phonepad.save-as.folder-picker"
+        ].firstMatch
+        XCTAssertTrue(folderPicker.waitForExistence(timeout: 5))
     }
 
     @MainActor

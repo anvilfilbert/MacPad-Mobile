@@ -55,6 +55,7 @@ struct PhonePadFolderPicker: UIViewControllerRepresentable {
         )
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
+        picker.view.accessibilityIdentifier = "phonepad.save-as.folder-picker"
         return picker
     }
 

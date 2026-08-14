@@ -1,10 +1,62 @@
 import Foundation
 
+public enum RecoveryPendingSaveDestination: Equatable, Hashable, Sendable {
+    case boundFile
+    case saveAs(RecoverySaveAsDestination)
+}
+
 public struct RecoveryPendingSave: Codable, Equatable, Hashable, Sendable {
     public let intendedOutputDigest: FileDigest
+    public let destination: RecoveryPendingSaveDestination
 
     public init(intendedOutputDigest: FileDigest) {
         self.intendedOutputDigest = intendedOutputDigest
+        self.destination = .boundFile
+    }
+
+    public init(
+        intendedOutputDigest: FileDigest,
+        destination: RecoveryPendingSaveDestination
+    ) {
+        self.intendedOutputDigest = intendedOutputDigest
+        self.destination = destination
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        intendedOutputDigest = try container.decode(
+            FileDigest.self,
+            forKey: .intendedOutputDigest
+        )
+        if container.contains(.saveAsDestination) {
+            destination = .saveAs(
+                try container.decode(
+                    RecoverySaveAsDestination.self,
+                    forKey: .saveAsDestination
+                )
+            )
+        } else {
+            destination = .boundFile
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(intendedOutputDigest, forKey: .intendedOutputDigest)
+        switch destination {
+        case .boundFile:
+            break
+        case let .saveAs(saveAsDestination):
+            try container.encode(
+                saveAsDestination,
+                forKey: .saveAsDestination
+            )
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case intendedOutputDigest
+        case saveAsDestination
     }
 }
 
@@ -57,7 +109,7 @@ public struct RecoveryEnvelope: Codable, Equatable, Sendable {
         fileReference: RecoveryFileReference?,
         pendingSave: RecoveryPendingSave?
     ) throws {
-        guard pendingSave == nil || fileReference != nil else {
+        guard pendingSave?.destination != .boundFile || fileReference != nil else {
             throw RecoveryEnvelopeValidationError.pendingSaveRequiresFileReference
         }
         self.formatVersion = formatVersion

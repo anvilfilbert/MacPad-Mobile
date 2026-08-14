@@ -8,6 +8,1320 @@ import PhonePadCore
 
 @MainActor
 final class FileAccessConnectorTests: XCTestCase {
+    func testPreflightSaveAsAbsentTargetReturnsReadyDurablePlan() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Draft.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case .ready = preflight else {
+            return XCTFail("Expected absent target to be ready, received \(preflight).")
+        }
+        XCTAssertEqual(preflight.plan.fileName, fileName)
+        XCTAssertEqual(preflight.plan.expectation, .absent)
+        var bookmarkIsStale = false
+        let resolvedDirectoryURL = try URL(
+            resolvingBookmarkData: preflight.plan.directoryBookmark.data,
+            options: [.withoutUI, .withoutImplicitStartAccessing],
+            relativeTo: nil,
+            bookmarkDataIsStale: &bookmarkIsStale
+        )
+        XCTAssertFalse(bookmarkIsStale)
+        XCTAssertEqual(
+            resolvedDirectoryURL.standardizedFileURL,
+            folderURL.standardizedFileURL
+        )
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), [])
+    }
+
+    func testPreflightSaveAsExistingRegularTargetRequiresExactReplacementSnapshot() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let targetURL = folderURL.appendingPathComponent("Existing.txt", isDirectory: false)
+        let originalData = Data("Existing bytes\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let fileName = try ValidatedFileName(validating: "Existing.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .replacementRequired(plan) = preflight,
+              case let .existing(snapshot) = plan.expectation else {
+            return XCTFail(
+                "Expected existing target replacement snapshot, received \(preflight)."
+            )
+        }
+        XCTAssertEqual(snapshot.digest, try digest(data: originalData))
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), ["Existing.txt"])
+    }
+
+    func testPreflightSaveAsStreamsSnapshotForExistingTargetAboveTextLimit() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let targetURL = folderURL.appendingPathComponent("Large Existing.bin")
+        let originalData = Data(
+            repeating: 0xa5,
+            count: maximumSupportedTextFileByteCount + 1
+        )
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: try ValidatedFileName(validating: "Large Existing.bin"),
+            currentDocumentID: DocumentID(rawValue: UUID()),
+            collisionClaims: []
+        )
+
+        guard case let .replacementRequired(plan) = preflight,
+              case let .existing(snapshot) = plan.expectation else {
+            return XCTFail("Expected large regular target snapshot, received \(preflight).")
+        }
+        XCTAssertEqual(snapshot.digest, try digest(data: originalData))
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: targetURL.path)[.size] as? Int,
+            maximumSupportedTextFileByteCount + 1
+        )
+    }
+
+    func testPreflightSaveAsCurrentActiveFileReturnsCurrentFilePlan() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let targetURL = folderURL.appendingPathComponent("Current.txt", isDirectory: false)
+        try Data("Current bytes\n".utf8).write(
+            to: targetURL,
+            options: .withoutOverwriting
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let identity = FileIdentity(volumeUUID: UUID(), documentIdentifier: 41)
+        let reference = FileCollisionReference(
+            bookmark: try FileBookmark(
+                data: targetURL.bookmarkData(
+                    options: [],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+            ),
+            identity: identity
+        )
+        let connector = makeInjectedConnector(
+            identityReader: { _ in identity },
+            replacer: replaceFile
+        )
+
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: try ValidatedFileName(validating: "Current.txt"),
+            currentDocumentID: currentDocumentID,
+            collisionClaims: [
+                .activeTab(documentID: currentDocumentID, reference: reference)
+            ]
+        )
+
+        guard case .currentFile = preflight else {
+            return XCTFail("Expected current File routing, received \(preflight).")
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), Data("Current bytes\n".utf8))
+    }
+
+    func testPreflightSaveAsRejectsActiveRecoveryAndPendingDestinationCollisions() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let targetURL = folderURL.appendingPathComponent("Claimed.txt", isDirectory: false)
+        let originalData = Data("Claimed bytes\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let claimedDocumentID = DocumentID(rawValue: UUID())
+        let identity = FileIdentity(volumeUUID: UUID(), documentIdentifier: 42)
+        let targetBookmark = try FileBookmark(
+            data: targetURL.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        )
+        let directoryBookmark = try FileBookmark(
+            data: folderURL.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        )
+        let reference = FileCollisionReference(
+            bookmark: targetBookmark,
+            identity: identity
+        )
+        let claims: [FileCollisionClaim] = [
+            .activeTab(documentID: claimedDocumentID, reference: reference),
+            .recoveryItem(documentID: claimedDocumentID, reference: reference),
+            .pendingSaveAs(
+                documentID: claimedDocumentID,
+                destination: RecoverySaveAsDestination(
+                    directoryBookmark: directoryBookmark,
+                    fileName: try ValidatedFileName(validating: "Claimed.txt")
+                )
+            ),
+        ]
+
+        for claim in claims {
+            let connector = makeInjectedConnector(
+                identityReader: { _ in identity },
+                replacer: replaceFile
+            )
+            do {
+                _ = try await connector.preflightSaveAsTarget(
+                    in: folderURL,
+                    fileName: try ValidatedFileName(validating: "Claimed.txt"),
+                    currentDocumentID: currentDocumentID,
+                    collisionClaims: [claim]
+                )
+                XCTFail("Expected Save As collision for \(claim).")
+            } catch let error as FileAccessConnectorError {
+                XCTAssertEqual(error, .saveAsTargetCollision(claim))
+            }
+            XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+        }
+    }
+
+    func testPreflightSaveAsRejectsPackageSymlinkAndSpecialTargetsWithoutMutation() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let packageURL = folderURL.appendingPathComponent("Document.rtfd", isDirectory: true)
+        let destinationURL = folderURL.appendingPathComponent("Destination.txt", isDirectory: false)
+        let symbolicLinkURL = folderURL.appendingPathComponent("Link.txt", isDirectory: false)
+        let specialURL = folderURL.appendingPathComponent("Pipe.txt", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: packageURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let packageContentURL = packageURL.appendingPathComponent("TXT.rtf")
+        let packageData = Data("Package bytes".utf8)
+        try packageData.write(to: packageContentURL, options: .withoutOverwriting)
+        let destinationData = Data("Destination bytes".utf8)
+        try destinationData.write(to: destinationURL, options: .withoutOverwriting)
+        try FileManager.default.createSymbolicLink(
+            at: symbolicLinkURL,
+            withDestinationURL: destinationURL
+        )
+        XCTAssertEqual(
+            specialURL.path.withCString { path in
+                mkfifo(path, mode_t(S_IRUSR | S_IWUSR))
+            },
+            0
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+        let cases: [(String, FileAccessConnectorError)] = [
+            ("Document.rtfd", .selectedFileIsPackage),
+            ("Link.txt", .targetAlreadyExists(.symbolicLink)),
+            ("Pipe.txt", .targetAlreadyExists(.special)),
+        ]
+
+        for testCase in cases {
+            do {
+                _ = try await connector.preflightSaveAsTarget(
+                    in: folderURL,
+                    fileName: try ValidatedFileName(validating: testCase.0),
+                    currentDocumentID: currentDocumentID,
+                    collisionClaims: []
+                )
+                XCTFail("Expected \(testCase.0) to be rejected.")
+            } catch let error as FileAccessConnectorError {
+                XCTAssertEqual(error, testCase.1)
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: packageContentURL), packageData)
+        XCTAssertEqual(try Data(contentsOf: destinationURL), destinationData)
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: symbolicLinkURL.path),
+            destinationURL.path
+        )
+    }
+
+    func testCreateSaveAsTargetWritesAndVerifiesPreflightedAbsentTarget() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Created Save As.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let encodedFile = try encodeTextFile(
+            text: "First\nSecond",
+            encoding: .utf8WithBOM,
+            lineEnding: .crlf
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+        guard case let .ready(plan) = preflight else {
+            return XCTFail("Expected ready Save As plan, received \(preflight).")
+        }
+
+        let outcome = try await connector.createSaveAsTarget(
+            plan: plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.bound(binding)) = outcome else {
+            return XCTFail("Expected bound Save As output, received \(outcome).")
+        }
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        XCTAssertEqual(try Data(contentsOf: targetURL), encodedFile.data)
+        XCTAssertEqual(binding.locatorURL.standardizedFileURL, targetURL.standardizedFileURL)
+        XCTAssertEqual(binding.displayName, fileName)
+        XCTAssertEqual(binding.digest, encodedFile.digest)
+        XCTAssertEqual(binding.encoding, .utf8WithBOM)
+        XCTAssertEqual(binding.lineEnding, .crlf)
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), [fileName.value])
+    }
+
+    func testCreateSaveAsTargetAbortsWhenAbsentTargetAppearsWithoutResidue() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let targetURL = folderURL.appendingPathComponent("Appeared.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: try ValidatedFileName(validating: "Appeared.txt"),
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+        let appearedData = Data("Another writer won".utf8)
+        try appearedData.write(to: targetURL, options: .withoutOverwriting)
+
+        do {
+            _ = try await connector.createSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "PhonePad output"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected appeared target to abort Save As creation.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .saveAsTargetAppeared(.regularFile))
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), appearedData)
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), ["Appeared.txt"])
+    }
+
+    func testCreateSaveAsTargetRechecksPendingRecoveryCollisionBeforeWriting() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Pending.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+        let claim = FileCollisionClaim.pendingSaveAs(
+            documentID: DocumentID(rawValue: UUID()),
+            destination: RecoverySaveAsDestination(
+                directoryBookmark: preflight.plan.directoryBookmark,
+                fileName: fileName
+            )
+        )
+
+        do {
+            _ = try await connector.createSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Protected output"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: [claim]
+            )
+            XCTFail("Expected pending recovery target collision to abort creation.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .saveAsTargetCollision(claim))
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: folderURL.appendingPathComponent(fileName.value).path
+            )
+        )
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), [])
+    }
+
+    func testCreateSaveAsTargetBookmarkFailureReturnsVerifiedDetachedOutput() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Detached Save As.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: { url in
+                if url.standardizedFileURL == folderURL.standardizedFileURL {
+                    return try url.bookmarkData(
+                        options: [],
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil
+                    )
+                }
+                throw ForcedBookmarkCreationError()
+            }
+        )
+        let encodedFile = try encodeNewTextFile(text: "Verified detached\n")
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await connector.createSaveAsTarget(
+            plan: preflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.verifiedDetached(detachedFile)) = outcome else {
+            return XCTFail("Expected verified detached Save As, received \(outcome).")
+        }
+        XCTAssertEqual(detachedFile.displayName, fileName)
+        XCTAssertEqual(detachedFile.digest, encodedFile.digest)
+        XCTAssertEqual(
+            try Data(contentsOf: folderURL.appendingPathComponent(fileName.value)),
+            encodedFile.data
+        )
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), [fileName.value])
+    }
+
+    func testCreateSaveAsTargetCleansPartialStagingAfterWriteFailure() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Write Failure.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let recordedURLs = RecordedSaveAsStagingURLs()
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: makeBookmarkData,
+            saveAsStagingWriter: { _, stagingURL in
+                recordedURLs.record(fileURL: stagingURL)
+                try Data("partial".utf8).write(
+                    to: stagingURL,
+                    options: .withoutOverwriting
+                )
+                throw ForcedSaveAsStagingError(code: 811)
+            },
+            saveAsStagingCleaner: { directoryURL, fileURL, fileManager in
+                recordedURLs.record(directoryURL: directoryURL)
+                if fileManager.fileExists(atPath: fileURL.path) {
+                    try fileManager.removeItem(at: fileURL)
+                }
+                try fileManager.removeItem(at: directoryURL)
+            }
+        )
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        do {
+            _ = try await connector.createSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Never committed"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected injected staging write failure.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .replacementStagingCreationFailed(code: 811))
+        }
+        let stagingURLs = try XCTUnwrap(recordedURLs.snapshot())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.fileURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path))
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), [])
+    }
+
+    func testCreateSaveAsTargetReturnsVerifiedOutcomeWhenStagingCleanupRemains() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Cleanup Notice.txt")
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let recordedURLs = RecordedSaveAsStagingURLs()
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: makeBookmarkData,
+            saveAsStagingWriter: { data, stagingURL in
+                try data.write(to: stagingURL, options: .withoutOverwriting)
+            },
+            saveAsStagingCleaner: { directoryURL, fileURL, _ in
+                recordedURLs.record(directoryURL: directoryURL, fileURL: fileURL)
+                throw ForcedSaveAsStagingError(code: 812)
+            }
+        )
+        let encodedFile = try encodeNewTextFile(text: "Verified despite cleanup\n")
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await connector.createSaveAsTarget(
+            plan: preflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .verifiedWithResidualCleanup(.bound(binding), code) = outcome else {
+            return XCTFail("Expected verified cleanup notice, received \(outcome).")
+        }
+        XCTAssertEqual(code, 812)
+        XCTAssertEqual(binding.digest, encodedFile.digest)
+        XCTAssertEqual(
+            try Data(contentsOf: folderURL.appendingPathComponent(fileName.value)),
+            encodedFile.data
+        )
+        let stagingURLs = try XCTUnwrap(recordedURLs.snapshot())
+        addTeardownBlock {
+            if FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path) {
+                try FileManager.default.removeItem(at: stagingURLs.directoryURL)
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.fileURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path))
+    }
+
+    func testReplaceSaveAsTargetRechecksAndVerifiesConfirmedExistingTarget() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Replace.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let originalData = Data("Original bytes\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let encodedFile = try encodeTextFile(
+            text: "Café\nSecond",
+            encoding: .windows1252,
+            lineEnding: .cr
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+        guard case let .replacementRequired(plan) = preflight else {
+            return XCTFail("Expected replacement confirmation plan, received \(preflight).")
+        }
+
+        let outcome = try await connector.replaceSaveAsTarget(
+            plan: plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.bound(binding)) = outcome else {
+            return XCTFail("Expected verified replacement binding, received \(outcome).")
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), encodedFile.data)
+        XCTAssertEqual(binding.locatorURL.standardizedFileURL, targetURL.standardizedFileURL)
+        XCTAssertEqual(binding.displayName, fileName)
+        XCTAssertEqual(binding.digest, encodedFile.digest)
+        XCTAssertEqual(binding.encoding, .windows1252)
+        XCTAssertEqual(binding.lineEnding, .cr)
+        XCTAssertEqual(try folderItemNames(folderURL: folderURL), [fileName.value])
+    }
+
+    func testReplaceSaveAsTargetAbortsWhenConfirmedContentChanges() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Changed.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let originalData = Data("Confirmed bytes\n".utf8)
+        let changedData = Data("Changed elsewhere\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+        try changedData.write(to: targetURL, options: .atomic)
+
+        do {
+            _ = try await connector.replaceSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "PhonePad edit\n"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected changed replacement target to abort.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .saveAsTargetChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), changedData)
+    }
+
+    func testReplaceSaveAsTargetAbortsWhenConfirmedTargetDisappearsOrChangesType() async throws {
+        let replacementKinds: [ExistingFileSystemItemKind?] = [
+            nil,
+            .directory,
+            .symbolicLink,
+            .special,
+        ]
+
+        for replacementKind in replacementKinds {
+            let folderURL = try makeTemporaryFolder()
+            let fileName = try ValidatedFileName(validating: "Race.txt")
+            let targetURL = folderURL.appendingPathComponent(fileName.value)
+            let destinationURL = folderURL.appendingPathComponent("Destination.txt")
+            let destinationData = Data("Destination bytes\n".utf8)
+            try Data("Confirmed bytes\n".utf8).write(
+                to: targetURL,
+                options: .withoutOverwriting
+            )
+            let currentDocumentID = DocumentID(rawValue: UUID())
+            let connector = FileAccessConnector(fileManager: .default)
+            let preflight = try await connector.preflightSaveAsTarget(
+                in: folderURL,
+                fileName: fileName,
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            try FileManager.default.removeItem(at: targetURL)
+            switch replacementKind {
+            case nil:
+                break
+            case .directory:
+                try FileManager.default.createDirectory(
+                    at: targetURL,
+                    withIntermediateDirectories: false,
+                    attributes: nil
+                )
+            case .symbolicLink:
+                try destinationData.write(
+                    to: destinationURL,
+                    options: .withoutOverwriting
+                )
+                try FileManager.default.createSymbolicLink(
+                    at: targetURL,
+                    withDestinationURL: destinationURL
+                )
+            case .special:
+                XCTAssertEqual(
+                    targetURL.path.withCString { path in
+                        mkfifo(path, mode_t(S_IRUSR | S_IWUSR))
+                    },
+                    0
+                )
+            case .regularFile:
+                XCTFail("Unexpected replacement test case.")
+            }
+
+            do {
+                _ = try await connector.replaceSaveAsTarget(
+                    plan: preflight.plan,
+                    encodedFile: try encodeNewTextFile(text: "PhonePad edit\n"),
+                    currentDocumentID: currentDocumentID,
+                    collisionClaims: []
+                )
+                XCTFail("Expected replacement target race to abort.")
+            } catch let error as FileAccessConnectorError {
+                XCTAssertEqual(error, .saveAsTargetChanged)
+            }
+            if replacementKind == .symbolicLink {
+                XCTAssertEqual(try Data(contentsOf: destinationURL), destinationData)
+            }
+        }
+    }
+
+    func testReplaceSaveAsTargetAbortsWhenStableIdentityChanges() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Identity.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let originalData = Data("Same bytes\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let confirmedIdentity = FileIdentity(
+            volumeUUID: UUID(),
+            documentIdentifier: 91
+        )
+        let changedIdentity = FileIdentity(
+            volumeUUID: UUID(),
+            documentIdentifier: 92
+        )
+        let identities = SequencedFileIdentities(
+            identities: [confirmedIdentity, changedIdentity]
+        )
+        let connector = makeInjectedConnector(
+            identityReader: { _ in identities.next() },
+            replacer: replaceFile
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        do {
+            _ = try await connector.replaceSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "PhonePad edit\n"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected stable identity change to abort replacement.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .saveAsTargetChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+    }
+
+    func testReplaceSaveAsTargetRechecksFreshCollisionBeforeWriting() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Claimed Replace.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let originalData = Data("Claimed bytes\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+        let claim = FileCollisionClaim.recoveryItem(
+            documentID: DocumentID(rawValue: UUID()),
+            reference: FileCollisionReference(
+                bookmark: try FileBookmark(data: makeBookmarkData(url: targetURL)),
+                identity: nil
+            )
+        )
+
+        do {
+            _ = try await connector.replaceSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Protected edit\n"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: [claim]
+            )
+            XCTFail("Expected refreshed collision to abort replacement.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .saveAsTargetCollision(claim))
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+    }
+
+    func testReplaceSaveAsTargetBookmarkFailureReturnsVerifiedDetachedOutput() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Detached Replace.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        try Data("Original\n".utf8).write(to: targetURL, options: .withoutOverwriting)
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: { url in
+                if url.standardizedFileURL == folderURL.standardizedFileURL {
+                    return try makeBookmarkData(url: url)
+                }
+                throw ForcedBookmarkCreationError()
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let encodedFile = try encodeNewTextFile(text: "Verified replacement\n")
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await connector.replaceSaveAsTarget(
+            plan: preflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.verifiedDetached(detachedFile)) = outcome else {
+            return XCTFail("Expected verified detached replacement, received \(outcome).")
+        }
+        XCTAssertEqual(detachedFile.displayName, fileName)
+        XCTAssertEqual(detachedFile.digest, encodedFile.digest)
+        XCTAssertEqual(try Data(contentsOf: targetURL), encodedFile.data)
+    }
+
+    func testReplaceSaveAsTargetCleansPartialStagingAfterWriteFailure() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Replace Write Failure.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let originalData = Data("Original stays\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let recordedURLs = RecordedSaveAsStagingURLs()
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: makeBookmarkData,
+            saveAsStagingWriter: { _, stagingURL in
+                recordedURLs.record(fileURL: stagingURL)
+                try Data("partial".utf8).write(
+                    to: stagingURL,
+                    options: .withoutOverwriting
+                )
+                throw ForcedSaveAsStagingError(code: 813)
+            },
+            saveAsStagingCleaner: { directoryURL, fileURL, fileManager in
+                recordedURLs.record(directoryURL: directoryURL)
+                if fileManager.fileExists(atPath: fileURL.path) {
+                    try fileManager.removeItem(at: fileURL)
+                }
+                try fileManager.removeItem(at: directoryURL)
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        do {
+            _ = try await connector.replaceSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Never committed"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected injected replacement staging failure.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .replacementStagingCreationFailed(code: 813))
+        }
+        let stagingURLs = try XCTUnwrap(recordedURLs.snapshot())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.fileURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path))
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+    }
+
+    func testReplaceSaveAsTargetReturnsVerifiedOutcomeWhenStagingCleanupRemains() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Replace Cleanup Notice.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        try Data("Original\n".utf8).write(to: targetURL, options: .withoutOverwriting)
+        let recordedURLs = RecordedSaveAsStagingURLs()
+        let connector = FileAccessConnector(
+            fileManager: .default,
+            bookmarkCreator: makeBookmarkData,
+            saveAsStagingWriter: { data, stagingURL in
+                try data.write(to: stagingURL, options: .withoutOverwriting)
+            },
+            saveAsStagingCleaner: { directoryURL, fileURL, _ in
+                recordedURLs.record(directoryURL: directoryURL, fileURL: fileURL)
+                throw ForcedSaveAsStagingError(code: 814)
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let encodedFile = try encodeNewTextFile(text: "Verified replacement\n")
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await connector.replaceSaveAsTarget(
+            plan: preflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .verifiedWithResidualCleanup(.bound(binding), code) = outcome else {
+            return XCTFail("Expected verified replacement cleanup notice, received \(outcome).")
+        }
+        XCTAssertEqual(code, 814)
+        XCTAssertEqual(binding.digest, encodedFile.digest)
+        XCTAssertEqual(try Data(contentsOf: targetURL), encodedFile.data)
+        let stagingURLs = try XCTUnwrap(recordedURLs.snapshot())
+        addTeardownBlock {
+            if FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path) {
+                try FileManager.default.removeItem(at: stagingURLs.directoryURL)
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.fileURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path))
+    }
+
+    func testReplaceSaveAsTargetClassifiesReportedFailureWithoutLosingVerifiedState() async throws {
+        let originalFolderURL = try makeTemporaryFolder()
+        let originalFileName = try ValidatedFileName(validating: "Unchanged Replace.txt")
+        let originalTargetURL = originalFolderURL.appendingPathComponent(originalFileName.value)
+        let originalData = Data("Original\n".utf8)
+        try originalData.write(to: originalTargetURL, options: .withoutOverwriting)
+        let unchangedConnector = makeInjectedConnector(
+            identityReader: { _ in nil },
+            replacer: { _, _, _ in
+                throw ForcedReplacementError(code: 815)
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let unchangedPreflight = try await unchangedConnector.preflightSaveAsTarget(
+            in: originalFolderURL,
+            fileName: originalFileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        do {
+            _ = try await unchangedConnector.replaceSaveAsTarget(
+                plan: unchangedPreflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Edited\n"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected unchanged replacement failure.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(error, .replacementFailed(code: 815))
+        }
+        XCTAssertEqual(try Data(contentsOf: originalTargetURL), originalData)
+
+        let succeededFolderURL = try makeTemporaryFolder()
+        let succeededFileName = try ValidatedFileName(validating: "Reported Replace.txt")
+        let succeededTargetURL = succeededFolderURL.appendingPathComponent(
+            succeededFileName.value
+        )
+        try originalData.write(to: succeededTargetURL, options: .withoutOverwriting)
+        let succeededConnector = makeInjectedConnector(
+            identityReader: { _ in nil },
+            replacer: { originalURL, stagingURL, fileManager in
+                _ = try replaceFile(
+                    originalURL: originalURL,
+                    stagingURL: stagingURL,
+                    fileManager: fileManager
+                )
+                throw ForcedReplacementError(code: 816)
+            }
+        )
+        let encodedFile = try encodeNewTextFile(text: "Verified despite report\n")
+        let succeededPreflight = try await succeededConnector.preflightSaveAsTarget(
+            in: succeededFolderURL,
+            fileName: succeededFileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await succeededConnector.replaceSaveAsTarget(
+            plan: succeededPreflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.bound(binding)) = outcome else {
+            return XCTFail("Expected verified replacement outcome, received \(outcome).")
+        }
+        XCTAssertEqual(binding.digest, encodedFile.digest)
+        XCTAssertEqual(try Data(contentsOf: succeededTargetURL), encodedFile.data)
+    }
+
+    func testReplaceSaveAsTargetPreservesReportedRelocatedOriginalForMissingOrThirdTarget() async throws {
+        let thirdTargetCases: [Data?] = [
+            nil,
+            Data("Unexpected third version\n".utf8),
+        ]
+
+        for thirdTargetData in thirdTargetCases {
+            let folderURL = try makeTemporaryFolder()
+            let fileName = try ValidatedFileName(validating: "Relocated.txt")
+            let targetURL = folderURL.appendingPathComponent(fileName.value)
+            let originalData = Data("Confirmed original\n".utf8)
+            try originalData.write(to: targetURL, options: .withoutOverwriting)
+            let recordedURLs = RecordedSaveAsStagingURLs()
+            let currentDocumentID = DocumentID(rawValue: UUID())
+            let preflight: SaveAsTargetPreflight
+            var preservedFileName: ValidatedFileName?
+            do {
+                let connector = makeInjectedConnector(
+                    identityReader: { _ in nil },
+                    replacer: { originalURL, stagingURL, fileManager in
+                        recordedURLs.record(fileURL: stagingURL)
+                        try fileManager.removeItem(at: stagingURL)
+                        try fileManager.moveItem(at: originalURL, to: stagingURL)
+                        if let thirdTargetData {
+                            try thirdTargetData.write(
+                                to: originalURL,
+                                options: .withoutOverwriting
+                            )
+                        }
+                        throw NSError(
+                            domain: "PhonePadTests.RelocatedOriginal",
+                            code: 817,
+                            userInfo: ["NSFileOriginalItemLocationKey": stagingURL]
+                        )
+                    }
+                )
+                preflight = try await connector.preflightSaveAsTarget(
+                    in: folderURL,
+                    fileName: fileName,
+                    currentDocumentID: currentDocumentID,
+                    collisionClaims: []
+                )
+                do {
+                    _ = try await connector.replaceSaveAsTarget(
+                        plan: preflight.plan,
+                        encodedFile: try encodeNewTextFile(text: "Intended edit\n"),
+                        currentDocumentID: currentDocumentID,
+                        collisionClaims: []
+                    )
+                    XCTFail("Expected relocated replacement outcome to remain explicit.")
+                } catch let error as FileAccessConnectorError {
+                    guard case let .replacementReportedRelocatedItem(
+                        code,
+                        generation,
+                        fileName
+                    ) = error else {
+                        return XCTFail("Expected durable relocated-item result, received \(error).")
+                    }
+                    XCTAssertEqual(code, 817)
+                    XCTAssertEqual(generation, .original)
+                    preservedFileName = fileName
+                }
+            }
+            let stagingURLs = try XCTUnwrap(recordedURLs.snapshot())
+            XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.fileURL.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path))
+            let durableFileName = try XCTUnwrap(preservedFileName)
+            var directoryBookmarkIsStale = false
+            let resolvedDirectoryURL = try URL(
+                resolvingBookmarkData: preflight.plan.directoryBookmark.data,
+                options: [.withoutUI, .withoutImplicitStartAccessing],
+                relativeTo: nil,
+                bookmarkDataIsStale: &directoryBookmarkIsStale
+            )
+            XCTAssertFalse(directoryBookmarkIsStale)
+            let preservedURL = resolvedDirectoryURL.appendingPathComponent(
+                durableFileName.value
+            )
+            let reopenedFile = try await FileAccessConnector(
+                fileManager: .default
+            ).openTextFile(at: preservedURL)
+            XCTAssertEqual(reopenedFile.text, "Confirmed original\n")
+            XCTAssertEqual(try Data(contentsOf: preservedURL), originalData)
+            if let thirdTargetData {
+                XCTAssertEqual(try Data(contentsOf: targetURL), thirdTargetData)
+                XCTAssertNotEqual(durableFileName, fileName)
+            } else {
+                XCTAssertEqual(durableFileName, fileName)
+                XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+            }
+        }
+    }
+
+    func testReplaceSaveAsTargetPreservesReportedIntendedOrUnexpectedItemAsSibling() async throws {
+        let encodedFile = try encodeNewTextFile(text: "Intended output\n")
+        let reportedCases: [(Data, SaveAsRelocatedFileGeneration)] = [
+            (encodedFile.data, .intended),
+            (Data("Unexpected reported bytes\n".utf8), .unexpected),
+        ]
+
+        for (reportedData, expectedGeneration) in reportedCases {
+            let folderURL = try makeTemporaryFolder()
+            let fileName = try ValidatedFileName(validating: "Requested.txt")
+            let targetURL = folderURL.appendingPathComponent(fileName.value)
+            try Data("Original\n".utf8).write(
+                to: targetURL,
+                options: .withoutOverwriting
+            )
+            let connector = makeInjectedConnector(
+                identityReader: { _ in nil },
+                replacer: { originalURL, stagingURL, fileManager in
+                    try reportedData.write(to: stagingURL, options: .atomic)
+                    try fileManager.removeItem(at: originalURL)
+                    throw NSError(
+                        domain: "PhonePadTests.RelocatedGeneration",
+                        code: 818,
+                        userInfo: ["NSFileOriginalItemLocationKey": stagingURL]
+                    )
+                }
+            )
+            let currentDocumentID = DocumentID(rawValue: UUID())
+            let preflight = try await connector.preflightSaveAsTarget(
+                in: folderURL,
+                fileName: fileName,
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            var preservedFileName: ValidatedFileName?
+
+            do {
+                _ = try await connector.replaceSaveAsTarget(
+                    plan: preflight.plan,
+                    encodedFile: encodedFile,
+                    currentDocumentID: currentDocumentID,
+                    collisionClaims: []
+                )
+                XCTFail("Expected reported generation to remain an explicit failure.")
+            } catch let error as FileAccessConnectorError {
+                guard case let .replacementReportedRelocatedItem(
+                    code,
+                    generation,
+                    fileName
+                ) = error else {
+                    return XCTFail("Expected durable reported item, received \(error).")
+                }
+                XCTAssertEqual(code, 818)
+                XCTAssertEqual(generation, expectedGeneration)
+                preservedFileName = fileName
+            }
+            let durableFileName = try XCTUnwrap(preservedFileName)
+            XCTAssertNotEqual(durableFileName, fileName)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: targetURL.path))
+            XCTAssertEqual(
+                try Data(
+                    contentsOf: folderURL.appendingPathComponent(
+                        durableFileName.value
+                    )
+                ),
+                reportedData
+            )
+        }
+    }
+
+    func testReplaceSaveAsTargetRestoresOriginalWhenCoordinationAccessorChangesSourceURL() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let providerTemporaryDirectoryURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Same Volume.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let relocatedURL = providerTemporaryDirectoryURL.appendingPathComponent(
+            "Provider Relocated Original"
+        )
+        let coordinatedSourceURL = providerTemporaryDirectoryURL.appendingPathComponent(
+            "Coordinated Provider Source"
+        )
+        let originalData = Data("Original from provider temp\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let connector = makeInjectedConnector(
+            identityReader: { _ in nil },
+            replacer: { originalURL, stagingURL, fileManager in
+                try fileManager.removeItem(at: stagingURL)
+                try fileManager.moveItem(at: originalURL, to: relocatedURL)
+                throw NSError(
+                    domain: "PhonePadTests.SameVolumeRelocatedOriginal",
+                    code: 820,
+                    userInfo: ["NSFileOriginalItemLocationKey": relocatedURL]
+                )
+            },
+            saveAsRecoveryAccessorSourceProvider: {
+                accessorSourceURL,
+                fileManager in
+                try fileManager.moveItem(
+                    at: accessorSourceURL,
+                    to: coordinatedSourceURL
+                )
+                return coordinatedSourceURL
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        do {
+            _ = try await connector.replaceSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Intended edit\n"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected provider-reported original recovery result.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(
+                error,
+                .replacementReportedRelocatedItem(
+                    code: 820,
+                    generation: .original,
+                    preservedFileName: fileName
+                )
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: relocatedURL.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: coordinatedSourceURL.path)
+        )
+        XCTAssertEqual(try Data(contentsOf: targetURL), originalData)
+        let reopenedFile = try await FileAccessConnector(
+            fileManager: .default
+        ).openTextFile(at: targetURL)
+        XCTAssertEqual(reopenedFile.text, "Original from provider temp\n")
+    }
+
+    func testReplaceSaveAsTargetPreservesTemporaryCandidateWhenDurableRecoveryFails() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Recovery Failure.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let originalData = Data("Original generation\n".utf8)
+        try originalData.write(to: targetURL, options: .withoutOverwriting)
+        let confirmedIdentity = FileIdentity(
+            volumeUUID: UUID(),
+            documentIdentifier: 101
+        )
+        let changedIdentity = FileIdentity(
+            volumeUUID: UUID(),
+            documentIdentifier: 102
+        )
+        let identities = SequencedFileIdentities(
+            identities: [
+                confirmedIdentity,
+                confirmedIdentity,
+                confirmedIdentity,
+                changedIdentity,
+            ]
+        )
+        let recordedURLs = RecordedSaveAsStagingURLs()
+        let connector = makeInjectedConnector(
+            identityReader: { _ in identities.next() },
+            replacer: { originalURL, stagingURL, fileManager in
+                recordedURLs.record(fileURL: stagingURL)
+                try fileManager.removeItem(at: stagingURL)
+                try fileManager.moveItem(at: originalURL, to: stagingURL)
+                throw NSError(
+                    domain: "PhonePadTests.RelocatedRecoveryFailure",
+                    code: 819,
+                    userInfo: ["NSFileOriginalItemLocationKey": stagingURL]
+                )
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        do {
+            _ = try await connector.replaceSaveAsTarget(
+                plan: preflight.plan,
+                encodedFile: try encodeNewTextFile(text: "Intended edit\n"),
+                currentDocumentID: currentDocumentID,
+                collisionClaims: []
+            )
+            XCTFail("Expected durable recovery verification to fail.")
+        } catch let error as FileAccessConnectorError {
+            XCTAssertEqual(
+                error,
+                .replacementReportedItemPreservationFailed(
+                    replacementCode: 819,
+                    preservationCode: Int(EBUSY),
+                    generation: .original
+                )
+            )
+        }
+        let stagingURLs = try XCTUnwrap(recordedURLs.snapshot())
+        addTeardownBlock {
+            if FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path) {
+                try FileManager.default.removeItem(at: stagingURLs.directoryURL)
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: stagingURLs.fileURL), originalData)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagingURLs.directoryURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: targetURL.path))
+    }
+
+    func testReplaceSaveAsTargetAcceptsVerifiedDifferentReturnedDirectChild() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let requestedFileName = try ValidatedFileName(validating: "Requested.txt")
+        let returnedFileName = try ValidatedFileName(validating: "Provider Result.txt")
+        let requestedURL = folderURL.appendingPathComponent(requestedFileName.value)
+        let returnedURL = folderURL.appendingPathComponent(returnedFileName.value)
+        let originalData = Data("Original remains\n".utf8)
+        try originalData.write(to: requestedURL, options: .withoutOverwriting)
+        let connector = makeInjectedConnector(
+            identityReader: { _ in nil },
+            replacer: { _, stagingURL, fileManager in
+                try fileManager.moveItem(at: stagingURL, to: returnedURL)
+                return returnedURL
+            }
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let encodedFile = try encodeNewTextFile(text: "Provider output\n")
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: requestedFileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await connector.replaceSaveAsTarget(
+            plan: preflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.bound(binding)) = outcome else {
+            return XCTFail("Expected verified provider result binding, received \(outcome).")
+        }
+        XCTAssertEqual(binding.locatorURL.standardizedFileURL, returnedURL.standardizedFileURL)
+        XCTAssertEqual(binding.displayName, returnedFileName)
+        XCTAssertEqual(binding.digest, encodedFile.digest)
+        XCTAssertEqual(try Data(contentsOf: returnedURL), encodedFile.data)
+        XCTAssertEqual(try Data(contentsOf: requestedURL), originalData)
+    }
+
+    func testCreateSaveAsTargetKeepsBookmarkWhenOptionalIdentityInspectionFails() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileName = try ValidatedFileName(validating: "Bookmark First.txt")
+        let targetURL = folderURL.appendingPathComponent(fileName.value)
+        let connector = makeInjectedConnector(
+            identityReader: { _ in
+                throw ForcedIdentityReadError()
+            },
+            replacer: replaceFile
+        )
+        let currentDocumentID = DocumentID(rawValue: UUID())
+        let encodedFile = try encodeNewTextFile(text: "Durably attached\n")
+        let preflight = try await connector.preflightSaveAsTarget(
+            in: folderURL,
+            fileName: fileName,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        let outcome = try await connector.createSaveAsTarget(
+            plan: preflight.plan,
+            encodedFile: encodedFile,
+            currentDocumentID: currentDocumentID,
+            collisionClaims: []
+        )
+
+        guard case let .complete(.bound(binding)) = outcome else {
+            return XCTFail("Expected bookmark-backed output, received \(outcome).")
+        }
+        XCTAssertNil(binding.identity)
+        var bookmarkIsStale = false
+        let resolvedURL = try URL(
+            resolvingBookmarkData: binding.bookmark.data,
+            options: [.withoutUI, .withoutImplicitStartAccessing],
+            relativeTo: nil,
+            bookmarkDataIsStale: &bookmarkIsStale
+        )
+        XCTAssertFalse(bookmarkIsStale)
+        XCTAssertEqual(resolvedURL.standardizedFileURL, targetURL.standardizedFileURL)
+        XCTAssertEqual(try Data(contentsOf: targetURL), encodedFile.data)
+    }
+
     func testCreateFileWritesAndVerifiesExactBytesWithResolvableBookmark() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileName = try ValidatedFileName(validating: "Created.txt")
@@ -764,6 +2078,79 @@ final class FileAccessConnectorTests: XCTestCase {
 
 private struct ForcedBookmarkCreationError: Error, Sendable {}
 
+private struct ForcedIdentityReadError: Error, Sendable {}
+
+private struct ForcedSaveAsStagingError: CustomNSError, Sendable {
+    static let errorDomain: String = "PhonePadTests.ForcedSaveAsStaging"
+
+    let code: Int
+
+    var errorCode: Int {
+        code
+    }
+}
+
+private struct SaveAsStagingURLs: Sendable {
+    let directoryURL: URL
+    let fileURL: URL
+}
+
+private final class RecordedSaveAsStagingURLs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var directoryURL: URL?
+    private var fileURL: URL?
+
+    func record(fileURL: URL) {
+        record(
+            directoryURL: fileURL.deletingLastPathComponent(),
+            fileURL: fileURL
+        )
+    }
+
+    func record(directoryURL: URL) {
+        lock.lock()
+        self.directoryURL = directoryURL
+        lock.unlock()
+    }
+
+    func record(directoryURL: URL, fileURL: URL) {
+        lock.lock()
+        self.directoryURL = directoryURL
+        self.fileURL = fileURL
+        lock.unlock()
+    }
+
+    func snapshot() -> SaveAsStagingURLs? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let directoryURL, let fileURL else {
+            return nil
+        }
+        return SaveAsStagingURLs(
+            directoryURL: directoryURL,
+            fileURL: fileURL
+        )
+    }
+}
+
+private final class SequencedFileIdentities: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identities: [FileIdentity]
+
+    init(identities: [FileIdentity]) {
+        self.identities = identities
+    }
+
+    func next() -> FileIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !identities.isEmpty else {
+            return nil
+        }
+        return identities.removeFirst()
+    }
+}
+
 private struct ForcedReplacementError: CustomNSError, Sendable {
     static let errorDomain: String = "PhonePadTests.ForcedReplacement"
 
@@ -831,6 +2218,14 @@ private func folderItemNames(folderURL: URL) throws -> [String] {
     .sorted()
 }
 
+private func makeBookmarkData(url: URL) throws -> Data {
+    try url.bookmarkData(
+        options: [],
+        includingResourceValuesForKeys: nil,
+        relativeTo: nil
+    )
+}
+
 private func digest(data: Data) throws -> FileDigest {
     try FileDigest(bytes: Data(SHA256.hash(data: data)))
 }
@@ -861,6 +2256,18 @@ private func makeInjectedConnector(
     identityReader: @escaping FileAccessConnector.FileIdentityReader,
     replacer: @escaping FileAccessConnector.FileReplacer
 ) -> FileAccessConnector {
+    makeInjectedConnector(
+        identityReader: identityReader,
+        replacer: replacer,
+        saveAsRecoveryAccessorSourceProvider: { sourceURL, _ in sourceURL }
+    )
+}
+
+private func makeInjectedConnector(
+    identityReader: @escaping FileAccessConnector.FileIdentityReader,
+    replacer: @escaping FileAccessConnector.FileReplacer,
+    saveAsRecoveryAccessorSourceProvider: @escaping FileAccessConnector.SaveAsRecoveryAccessorSourceProvider
+) -> FileAccessConnector {
     FileAccessConnector(
         fileManager: .default,
         bookmarkCreator: { url in
@@ -881,7 +2288,8 @@ private func makeInjectedConnector(
             return ResolvedFileBookmark(url: url, isStale: bookmarkIsStale)
         },
         identityReader: identityReader,
-        replacer: replacer
+        replacer: replacer,
+        saveAsRecoveryAccessorSourceProvider: saveAsRecoveryAccessorSourceProvider
     )
 }
 

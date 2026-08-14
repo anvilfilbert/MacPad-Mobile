@@ -318,23 +318,7 @@ public actor FileRecoveryStore: RecoveryStoring {
 
     public func recoveryItems() async throws -> [RecoveryItemSummary] {
         try prepareRecoveryDirectory()
-
-        let urls: [URL]
-        do {
-            urls = try fileManager.contentsOfDirectory(
-                at: rootURL,
-                includingPropertiesForKeys: nil,
-                options: []
-            )
-        } catch {
-            throw FileRecoveryStoreError.couldNotEnumerateRecovery(
-                String(describing: error)
-            )
-        }
-
-        let documentIDs = Set(
-            urls.compactMap { recoveryArtifactDocumentID(filename: $0.lastPathComponent) }
-        )
+        let documentIDs = try recoveryDocumentIDs()
         var items: [RecoveryItemSummary] = []
         for documentID in documentIDs {
             let paths = transactionPaths(documentID: documentID)
@@ -378,6 +362,54 @@ public actor FileRecoveryStore: RecoveryStoring {
         }
 
         return items.sorted(by: recoverySummaryComesBefore)
+    }
+
+    public func recoveryFileCollisionClaims(
+        excludingDocumentID: DocumentID
+    ) async throws -> [FileCollisionClaim] {
+        try prepareRecoveryDirectory()
+        let documentIDs = try recoveryDocumentIDs().filter {
+            $0 != excludingDocumentID
+        }.sorted {
+            $0.rawValue.uuidString < $1.rawValue.uuidString
+        }
+        var claims: [FileCollisionClaim] = []
+        for documentID in documentIDs {
+            let paths = transactionPaths(documentID: documentID)
+            if try reconcile(documentID: documentID, paths: paths) != nil {
+                continue
+            }
+            guard try recoveryArtifactExists(
+                documentID: documentID,
+                url: paths.canonical
+            ) else {
+                continue
+            }
+            let envelope = try readVerifiedEnvelope(
+                documentID: documentID,
+                url: paths.canonical
+            ).envelope
+            if let fileReference = envelope.fileReference {
+                claims.append(
+                    .recoveryItem(
+                        documentID: documentID,
+                        reference: FileCollisionReference(
+                            bookmark: fileReference.bookmark,
+                            identity: fileReference.identity
+                        )
+                    )
+                )
+            }
+            if case let .saveAs(destination)? = envelope.pendingSave?.destination {
+                claims.append(
+                    .pendingSaveAs(
+                        documentID: documentID,
+                        destination: destination
+                    )
+                )
+            }
+        }
+        return claims
     }
 
     @discardableResult
@@ -1226,6 +1258,26 @@ public actor FileRecoveryStore: RecoveryStoring {
                 String(describing: error)
             )
         }
+    }
+
+    private func recoveryDocumentIDs() throws -> Set<DocumentID> {
+        let urls: [URL]
+        do {
+            urls = try fileManager.contentsOfDirectory(
+                at: rootURL,
+                includingPropertiesForKeys: nil,
+                options: []
+            )
+        } catch {
+            throw FileRecoveryStoreError.couldNotEnumerateRecovery(
+                String(describing: error)
+            )
+        }
+        return Set(
+            urls.compactMap {
+                recoveryArtifactDocumentID(filename: $0.lastPathComponent)
+            }
+        )
     }
 
     private func validateEnvelopeBounds(
