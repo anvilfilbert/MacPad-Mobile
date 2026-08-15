@@ -403,7 +403,8 @@ final class PhonePadTabWorkspaceTests: XCTestCase {
                 text: "",
                 isUnsaved: false,
                 recoveryState: .clean
-            )
+            ),
+            displaySettings: .initial
         )
     }
 
@@ -435,7 +436,8 @@ final class PhonePadTabWorkspaceTests: XCTestCase {
                 fileBinding: binding,
                 isUnsaved: false,
                 recoveryState: .clean
-            )
+            ),
+            displaySettings: .initial
         )
     }
 }

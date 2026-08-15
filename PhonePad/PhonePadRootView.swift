@@ -64,7 +64,12 @@ struct PhonePadRootView: View {
     @ObservedObject private var model: PhonePadAppModel
     @State private var editorTransitionController: PhonePadEditorTransitionController
     @State private var editorFindController: PhonePadEditorFindController
+    @StateObject private var editorToolController: PhonePadEditorToolController
     @State private var editorFindError: String?
+    @State private var editorToolError: String?
+    @State private var goToLineIsPresented: Bool
+    @State private var goToLineValue: String
+    @State private var fontPickerIsPresented: Bool
     @State private var recoveryIsPresented: Bool
     @State private var discardCandidate: RecoveryDiscardCandidate?
     @State private var saveAsIsPresented: Bool
@@ -83,7 +88,14 @@ struct PhonePadRootView: View {
         self.model = model
         editorTransitionController = PhonePadEditorTransitionController()
         editorFindController = PhonePadEditorFindController()
+        _editorToolController = StateObject(
+            wrappedValue: PhonePadEditorToolController()
+        )
         editorFindError = nil
+        editorToolError = nil
+        goToLineIsPresented = false
+        goToLineValue = ""
+        fontPickerIsPresented = false
         recoveryIsPresented = false
         discardCandidate = nil
         saveAsIsPresented = false
@@ -126,10 +138,20 @@ struct PhonePadRootView: View {
                         }
                     ),
                     isEditable: !model.editorMutationDisabled,
+                    displaySettings: model.activeDisplaySettings,
                     transitionController: editorTransitionController,
-                    findController: editorFindController
+                    findController: editorFindController,
+                    toolController: editorToolController
                 )
                 .disabled(model.editorInteractionDisabled)
+                if model.activeDisplaySettings.statusVisible {
+                    PhonePadEditorStatusBar(
+                        position: activeEditorPosition,
+                        settings: model.activeDisplaySettings,
+                        encoding: activeStatusEncoding,
+                        lineEnding: activeStatusLineEnding
+                    )
+                }
             }
             .navigationTitle(model.state.activeTab.document.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -144,6 +166,9 @@ struct PhonePadRootView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     findMenu
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    editorDisplayMenu
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     actionMenu
@@ -161,6 +186,17 @@ struct PhonePadRootView: View {
                     .padding(8)
                     .background(Color.red)
                     .accessibilityIdentifier("phonepad.find.error")
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let editorToolError {
+                Text(editorToolError)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.red)
+                    .accessibilityIdentifier("phonepad.editor-tool.error")
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -211,6 +247,21 @@ struct PhonePadRootView: View {
                 onSelection: selectOpenFile,
                 onCancellation: cancelFilePicker,
                 onFailure: failFilePicker
+            )
+        }
+        .sheet(isPresented: $fontPickerIsPresented) {
+            PhonePadFontPicker(
+                onSelection: chooseEditorFont,
+                onCancellation: cancelEditorFontPicker
+            )
+            .accessibilityIdentifier("phonepad.font-picker")
+        }
+        .sheet(isPresented: $goToLineIsPresented) {
+            PhonePadGoToLineSheet(
+                lineValue: $goToLineValue,
+                errorMessage: editorToolError,
+                onCancellation: cancelGoToLine,
+                onConfirmation: goToRequestedLine
             )
         }
         .task {
@@ -564,6 +615,7 @@ struct PhonePadRootView: View {
             }
             .accessibilityIdentifier("phonepad.action-menu.document-recovery")
             .disabled(model.recoveryItems.isEmpty && model.recoveryCatalogError == nil)
+
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "ellipsis.circle")
@@ -585,6 +637,127 @@ struct PhonePadRootView: View {
         .accessibilityLabel("Actions")
         .accessibilityValue(actionMenuAccessibilityValue)
         .disabled(model.fileMutationDisabled)
+    }
+
+    private var editorDisplayMenu: some View {
+        PhonePadEditorDisplayMenu(
+            settings: model.activeDisplaySettings,
+            displayMutationDisabled: model.fileMutationDisabled,
+            insertionDisabled: model.editorMutationDisabled,
+            onChooseFont: { fontPickerIsPresented = true },
+            onZoomIn: { changeEditorZoom(by: 10) },
+            onZoomOut: { changeEditorZoom(by: -10) },
+            onResetZoom: { chooseEditorZoom(100) },
+            onToggleWordWrap: toggleEditorWordWrap,
+            onToggleStatus: toggleEditorStatus,
+            onGoToLine: presentGoToLine,
+            onInsertTimeAndDate: insertTimeAndDate
+        )
+    }
+
+    private var activeEditorPosition: EditorTextPosition {
+        guard let selection = editorToolController.selection,
+              selection.documentID == model.state.activeTab.document.id else {
+            return EditorTextPosition(line: 1, column: 1)
+        }
+        return selection.position
+    }
+
+    private var activeStatusEncoding: TextFileEncoding {
+        let document = model.state.activeTab.document
+        return document.fileBinding?.encoding
+            ?? document.recoveryFileReference?.encoding
+            ?? .utf8
+    }
+
+    private var activeStatusLineEnding: TextLineEnding {
+        let document = model.state.activeTab.document
+        return document.fileBinding?.lineEnding
+            ?? document.recoveryFileReference?.lineEnding
+            ?? .lf
+    }
+
+    private func goToRequestedLine() {
+        guard let line = Int(goToLineValue) else {
+            editorToolError = "Line must be a whole number. Enter a one-based line number and retry."
+            return
+        }
+        do {
+            try editorToolController.goToLine(oneBasedLine: line)
+            editorToolError = nil
+            goToLineIsPresented = false
+        } catch {
+            editorToolError = error.localizedDescription
+        }
+    }
+
+    private func insertTimeAndDate() {
+        do {
+            _ = try editorToolController.insertTimeAndDate(
+                date: Date(),
+                locale: .current,
+                calendar: .current,
+                timeZone: .current
+            )
+            editorToolError = nil
+        } catch {
+            editorToolError = error.localizedDescription
+        }
+    }
+
+    private func presentGoToLine() {
+        goToLineValue = ""
+        editorToolError = nil
+        goToLineIsPresented = true
+    }
+
+    private func cancelGoToLine() {
+        goToLineIsPresented = false
+        editorToolError = nil
+    }
+
+    private func toggleEditorWordWrap() {
+        performEditorDisplayMutation {
+            try model.toggleActiveTabWordWrap()
+        }
+    }
+
+    private func toggleEditorStatus() {
+        performEditorDisplayMutation {
+            try model.toggleActiveTabStatusVisibility()
+        }
+    }
+
+    private func chooseEditorFont(_ fontFamily: PhonePadFontFamily) {
+        fontPickerIsPresented = false
+        performEditorDisplayMutation {
+            try model.chooseActiveTabFont(fontFamily)
+        }
+    }
+
+    private func cancelEditorFontPicker() {
+        fontPickerIsPresented = false
+    }
+
+    private func changeEditorZoom(by step: Int) {
+        chooseEditorZoom(model.activeDisplaySettings.zoomPercent + step)
+    }
+
+    private func chooseEditorZoom(_ zoomPercent: Int) {
+        performEditorDisplayMutation {
+            try model.chooseActiveTabZoom(zoomPercent)
+        }
+    }
+
+    private func performEditorDisplayMutation(
+        _ mutation: () throws -> Void
+    ) {
+        do {
+            try mutation()
+            editorToolError = nil
+        } catch {
+            editorToolError = error.localizedDescription
+        }
     }
 
     private var tabClosePromptIsPresented: Binding<Bool> {

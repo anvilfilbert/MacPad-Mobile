@@ -480,6 +480,40 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testGoToLineMovesRealEditorSelectionAndUpdatesStatus() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launch()
+
+        let root = app.descendants(matching: .any)["phonepad.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        editor.typeText("first\nsecond\nthird")
+
+        let editorMenu = app.descendants(matching: .any)["phonepad.editor.menu"]
+            .firstMatch
+        XCTAssertTrue(editorMenu.waitForExistence(timeout: 2))
+        editorMenu.tap()
+        let goToLine = app.buttons["phonepad.editor.go-to-line"]
+        XCTAssertTrue(goToLine.waitForExistence(timeout: 2))
+        goToLine.tap()
+
+        let input = app.textFields["phonepad.go-to-line.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap()
+        input.typeText("3")
+        let confirm = app.buttons["phonepad.go-to-line.confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 2))
+        confirm.tap()
+
+        let position = app.staticTexts["phonepad.status.position"]
+        XCTAssertTrue(position.waitForExistence(timeout: 5))
+        XCTAssertEqual(position.label, "Ln 3, Col 1")
+    }
+
+    @MainActor
     func testMultipleTabsSelectAndReorderUsingStableIdentifiers() {
         let app = XCUIApplication()
         app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
