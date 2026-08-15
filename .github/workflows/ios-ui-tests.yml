@@ -1,0 +1,47 @@
+name: iOS UI Tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ui-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui-tests:
+    name: Full UI test suite
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.5
+        run: sudo xcode-select --switch /Applications/Xcode_26.5.app
+
+      - name: Report toolchain
+        run: xcodebuild -version
+
+      - name: Run full UI test suite
+        run: >-
+          xcodebuild
+          -quiet
+          -project PhonePad.xcodeproj
+          -scheme PhonePad
+          -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest'
+          -resultBundlePath '${{ runner.temp }}/PhonePadUITests.xcresult'
+          test
+          -only-testing:PhonePadUITests
+
+      - name: Upload failed UI test result
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhonePadUITests-${{ github.run_id }}
+          path: ${{ runner.temp }}/PhonePadUITests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

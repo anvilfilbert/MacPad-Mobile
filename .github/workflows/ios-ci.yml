@@ -1,0 +1,63 @@
+name: iOS CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Release build and unit tests
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.5
+        run: sudo xcode-select --switch /Applications/Xcode_26.5.app
+
+      - name: Report toolchain
+        run: xcodebuild -version
+
+      - name: Build Release with warnings as errors
+        run: >-
+          xcodebuild
+          -quiet
+          -project PhonePad.xcodeproj
+          -scheme PhonePad
+          -configuration Release
+          -destination 'generic/platform=iOS Simulator'
+          SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+          build
+
+      - name: Run unit and integration tests
+        run: >-
+          xcodebuild
+          -quiet
+          -project PhonePad.xcodeproj
+          -scheme PhonePad
+          -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest'
+          -resultBundlePath '${{ runner.temp }}/PhonePadTests.xcresult'
+          test
+          -only-testing:PhonePadTests
+
+      - name: Upload failed test result
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhonePadTests-${{ github.run_id }}
+          path: ${{ runner.temp }}/PhonePadTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
