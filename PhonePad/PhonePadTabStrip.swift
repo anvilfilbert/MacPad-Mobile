@@ -276,6 +276,8 @@ struct PhonePadTabStrip: View {
             return "Clean"
         case .checkpointPending:
             return "Protecting edits"
+        case .recoveryUnavailable:
+            return "Recovery unavailable"
         case .protectedUnsaved:
             return "Edits protected"
         }

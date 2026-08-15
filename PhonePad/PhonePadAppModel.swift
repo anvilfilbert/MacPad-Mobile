@@ -4,12 +4,27 @@ import SwiftUI
 
 private struct PendingRecoveryCheckpoint {
     let generation: UInt64
-    let previousState: PhonePadState
+    let checkpointBaseState: PhonePadState
+    let recoveryBaselineState: PhonePadState?
     let text: String
     let editedAt: Date
     let firstPendingAt: ContinuousClock.Instant
     let lastEditAt: ContinuousClock.Instant
     let requiresImmediateCheckpoint: Bool
+}
+
+private enum PhonePadRecoveryUnavailableActionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+    case recoveryIsAvailable
+
+    var errorDescription: String? {
+        switch self {
+        case .actionAlreadyInProgress:
+            return "Another File, recovery, or Tab action is running. Wait for it to finish and retry Recovery."
+        case .recoveryIsAvailable:
+            return "Recovery is available for the current Document. Retry Recovery is only needed after a checkpoint fails."
+        }
+    }
 }
 
 struct PendingExternalOpenRecoveryPrompt: Equatable, Sendable {
@@ -570,6 +585,29 @@ final class PhonePadAppModel: ObservableObject {
         terminalExternalOpenErrorPendingDismissal
     }
 
+    var recoveryUnavailableNotice: RecoveryUnavailableNotice? {
+        guard let checkpoint = failedCheckpoint,
+              state.activeTab.document.id
+                == checkpoint.checkpointBaseState.activeTab.document.id,
+              state.activeTab.document.recoveryState
+                == .recoveryUnavailable else {
+            return nil
+        }
+        let baselineDocument = checkpoint.recoveryBaselineState?
+            .tabs
+            .first(where: { tab in
+                tab.document.id == state.activeTab.document.id
+            })?
+            .document
+        return RecoveryUnavailableNotice(
+            documentID: state.activeTab.document.id,
+            hasNewerUnprotectedText: baselineDocument?.text
+                != state.activeTab.document.text,
+            hasLastVerifiedCheckpoint: baselineDocument?.recoveryState
+                == .protectedUnsaved
+        )
+    }
+
     deinit {
         presentationHintTask?.cancel()
     }
@@ -876,7 +914,8 @@ final class PhonePadAppModel: ObservableObject {
             guard await retryCurrentCheckpointIfNeeded(),
                   pendingCheckpoint == nil,
                   failedCheckpoint == nil,
-                  state.activeTab.document.recoveryState != .checkpointPending else {
+                  state.activeTab.document.recoveryState != .checkpointPending,
+                  state.activeTab.document.recoveryState != .recoveryUnavailable else {
                 throw PhonePadTabTransitionError
                     .checkpointMustFinishBeforeTransition
             }
@@ -2999,7 +3038,8 @@ final class PhonePadAppModel: ObservableObject {
         let now = checkpointClock.now
         let checkpoint = PendingRecoveryCheckpoint(
             generation: editGeneration,
-            previousState: transition.state,
+            checkpointBaseState: transition.state,
+            recoveryBaselineState: nil,
             text: transition.envelope.text,
             editedAt: transition.envelope.editedAt,
             firstPendingAt: now,
@@ -3237,7 +3277,7 @@ final class PhonePadAppModel: ObservableObject {
             switch document.recoveryState {
             case .clean, .protectedUnsaved:
                 return true
-            case .checkpointPending:
+            case .checkpointPending, .recoveryUnavailable:
                 break
             }
         }
@@ -3275,7 +3315,7 @@ final class PhonePadAppModel: ObservableObject {
         switch document.recoveryState {
         case .clean, .protectedUnsaved:
             return true
-        case .checkpointPending:
+        case .checkpointPending, .recoveryUnavailable:
             return false
         }
     }
@@ -4332,13 +4372,19 @@ final class PhonePadAppModel: ObservableObject {
             )
             try validateCommittedDocument(committedDocument)
         } catch {
-            guard let activeRequirement = requirements.first(where: {
+            let refreshedRequirements = try requirements.map { requirement in
+                try prepareTabClose(
+                    state: state,
+                    tabID: tabCloseRequirementTab(requirement).id
+                )
+            }
+            guard let activeRequirement = refreshedRequirements.first(where: {
                 tabCloseRequirementTab($0).id == originalActiveTabID
             }), case let .unsaved(preparedClose) = activeRequirement else {
                 throw error
             }
             pendingTabCloseSession = PendingTabCloseSession(
-                requirements: requirements,
+                requirements: refreshedRequirements,
                 originalActiveTabID: originalActiveTabID,
                 retainedTabID: retainedTabID,
                 phase: .processing
@@ -4633,11 +4679,11 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     private func clearCheckpointState(closedDocumentID: DocumentID) {
-        if pendingCheckpoint?.previousState.activeTab.document.id
+        if pendingCheckpoint?.checkpointBaseState.activeTab.document.id
             == closedDocumentID {
             pendingCheckpoint = nil
         }
-        if failedCheckpoint?.previousState.activeTab.document.id
+        if failedCheckpoint?.checkpointBaseState.activeTab.document.id
             == closedDocumentID {
             failedCheckpoint = nil
         }
@@ -4702,7 +4748,7 @@ final class PhonePadAppModel: ObservableObject {
         switch state.activeTab.document.recoveryState {
         case .clean, .protectedUnsaved:
             return
-        case .checkpointPending:
+        case .checkpointPending, .recoveryUnavailable:
             guard await retryCurrentCheckpointIfNeeded(),
                   pendingCheckpoint == nil,
                   failedCheckpoint == nil,
@@ -4776,7 +4822,10 @@ final class PhonePadAppModel: ObservableObject {
         let existingCheckpoint = pendingCheckpoint
         pendingCheckpoint = PendingRecoveryCheckpoint(
             generation: editGeneration,
-            previousState: previousState,
+            checkpointBaseState: existingCheckpoint?.checkpointBaseState
+                ?? previousState,
+            recoveryBaselineState: existingCheckpoint?.recoveryBaselineState
+                ?? previousState,
             text: transition.envelope.text,
             editedAt: transition.envelope.editedAt,
             firstPendingAt: existingCheckpoint?.firstPendingAt ?? now,
@@ -4786,6 +4835,97 @@ final class PhonePadAppModel: ObservableObject {
         )
         startCheckpointTaskIfNeeded()
         return true
+    }
+
+    @discardableResult
+    func retryActiveDocumentRecovery() async -> Bool {
+        guard !fileSaveInProgress,
+              !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
+            recoveryError = PhonePadRecoveryUnavailableActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard failedCheckpoint != nil,
+              state.activeTab.document.recoveryState
+                == .recoveryUnavailable else {
+            recoveryError = PhonePadRecoveryUnavailableActionError
+                .recoveryIsAvailable
+                .localizedDescription
+            return false
+        }
+        activeRecoveryAction = state.activeTab.document.id
+        defer { finishRecoveryAction() }
+        return await retryCurrentCheckpointIfNeeded()
+    }
+
+    @discardableResult
+    func discardRecoveryUnavailableEdits() async -> Bool {
+        guard !fileSaveInProgress,
+              !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
+            recoveryError = PhonePadRecoveryUnavailableActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard let checkpoint = failedCheckpoint,
+              state.activeTab.document.recoveryState
+                == .recoveryUnavailable else {
+            recoveryError = PhonePadRecoveryUnavailableActionError
+                .recoveryIsAvailable
+                .localizedDescription
+            return false
+        }
+        activeRecoveryAction = state.activeTab.document.id
+        defer { finishRecoveryAction() }
+        await cancelAndAwaitCheckpointTask()
+        let documentID = state.activeTab.document.id
+        do {
+            if let baselineState = checkpoint.recoveryBaselineState {
+                state = try restoreDocumentAfterRecoveryFailure(
+                    state: state,
+                    baselineState: baselineState,
+                    documentID: documentID,
+                    expectedUnprotectedText: checkpoint.text
+                )
+            } else {
+                let requirement = try prepareTabClose(
+                    state: state,
+                    tabID: state.activeTabID
+                )
+                guard case let .unsaved(preparedClose) = requirement else {
+                    throw PhonePadRecoveryUnavailableActionError
+                        .recoveryIsAvailable
+                }
+                let result = try await discardAndClosePreparedUnsavedTab(
+                    state: state,
+                    preparedClose: preparedClose,
+                    replacementDocumentID: DocumentID(rawValue: UUID()),
+                    replacementTabID: TabID(rawValue: UUID()),
+                    recoveryStore: recoveryStore
+                )
+                state = result.state
+                externalOpenEphemeralClaims.removeValue(forKey: documentID)
+            }
+            pendingCheckpoint = nil
+            failedCheckpoint = nil
+            recoveryError = nil
+            clearExternalOpenRecoveryProtectionFailure(
+                documentID: documentID
+            )
+            _ = await retryExternalOpenCleanupIfNeeded()
+            presentActiveFileConflictIfNeeded()
+            return true
+        } catch {
+            recoveryError = error.localizedDescription
+            return false
+        }
     }
 
     private func startCheckpointTaskIfNeeded() {
@@ -4801,6 +4941,8 @@ final class PhonePadAppModel: ObservableObject {
         await cancelAndAwaitCheckpointTask()
         guard let checkpoint = failedCheckpoint ?? pendingCheckpoint else {
             return state.activeTab.document.recoveryState != .checkpointPending
+                && state.activeTab.document.recoveryState
+                    != .recoveryUnavailable
         }
         let outcome = await persist(checkpoint: checkpoint)
         return outcome == .persisted
@@ -4833,7 +4975,8 @@ final class PhonePadAppModel: ObservableObject {
         guard await retryCurrentCheckpointIfNeeded(),
               pendingCheckpoint == nil,
               failedCheckpoint == nil,
-              state.activeTab.document.recoveryState != .checkpointPending else {
+              state.activeTab.document.recoveryState != .checkpointPending,
+              state.activeTab.document.recoveryState != .recoveryUnavailable else {
             fileSaveError = PhonePadFileSaveActionError
                 .checkpointMustFinishBeforeFileAction
                 .localizedDescription
@@ -4985,7 +5128,7 @@ final class PhonePadAppModel: ObservableObject {
     ) async -> RecoveryCheckpointPersistenceOutcome {
         do {
             _ = try await editActiveDocumentAndCheckpoint(
-                state: checkpoint.previousState,
+                state: checkpoint.checkpointBaseState,
                 newText: checkpoint.text,
                 editedAt: checkpoint.editedAt,
                 recoveryStore: recoveryStore
@@ -4993,7 +5136,7 @@ final class PhonePadAppModel: ObservableObject {
             guard !Task.isCancelled, editGeneration == checkpoint.generation else {
                 return .superseded
             }
-            let documentID = checkpoint.previousState.activeTab.document.id
+            let documentID = checkpoint.checkpointBaseState.activeTab.document.id
             state = try markDocumentRecoveryProtected(
                 state: state,
                 documentID: documentID,
@@ -5018,8 +5161,19 @@ final class PhonePadAppModel: ObservableObject {
             if pendingCheckpoint?.generation == checkpoint.generation {
                 pendingCheckpoint = nil
             }
-            failedCheckpoint = checkpoint
-            recoveryError = error.localizedDescription
+            do {
+                state = try markDocumentRecoveryUnavailable(
+                    state: state,
+                    documentID: checkpoint.checkpointBaseState
+                        .activeTab.document.id,
+                    expectedText: checkpoint.text
+                )
+                failedCheckpoint = checkpoint
+                recoveryError = error.localizedDescription
+            } catch let stateError {
+                failedCheckpoint = checkpoint
+                recoveryError = "Recovery checkpoint failed: \(error.localizedDescription) PhonePad could not enter Recovery Unavailable: \(stateError.localizedDescription)"
+            }
             return .failed
         }
     }

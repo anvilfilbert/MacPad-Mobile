@@ -526,7 +526,10 @@ final class PhonePadAppModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(250))
 
         XCTAssertNotNil(model.recoveryError)
-        XCTAssertEqual(model.state.activeTab.document.recoveryState, .checkpointPending)
+        XCTAssertEqual(
+            model.state.activeTab.document.recoveryState,
+            .recoveryUnavailable
+        )
         XCTAssertTrue(model.editorMutationDisabled)
         XCTAssertEqual(validationGate.attemptCount, 1)
         model.editActiveDocument(text: "Rejected after recovery failure\n")

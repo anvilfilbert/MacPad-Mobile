@@ -1,4 +1,5 @@
 import Foundation
+import PhonePadCore
 import SwiftUI
 
 @main
@@ -13,16 +14,18 @@ struct PhonePadApp: App {
     @State private var latestScenePhaseTransitionID: UUID = UUID()
 
     init() {
+        let environment = ProcessInfo.processInfo.environment
         let applicationSupportURL = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
         _model = StateObject(
-            wrappedValue: PhonePadAppModel(
+            wrappedValue: makePhonePadAppModel(
                 recoveryRootURL: phonePadRecoveryRootURL(
                     applicationSupportURL: applicationSupportURL,
-                    environment: ProcessInfo.processInfo.environment
-                )
+                    environment: environment
+                ),
+                environment: environment
             )
         )
     }
@@ -79,6 +82,31 @@ struct PhonePadApp: App {
         }
     }
     #endif
+}
+
+@MainActor
+private func makePhonePadAppModel(
+    recoveryRootURL: URL,
+    environment: [String: String]
+) -> PhonePadAppModel {
+    #if DEBUG
+    if environment["PHONEPAD_UI_TEST_RECOVERY_FAILURE"] == "1" {
+        return PhonePadAppModel(
+            state: makeInitialPhonePadState(
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID())
+            ),
+            recoveryStore: FileRecoveryStore(
+                rootURL: recoveryRootURL,
+                fileManager: .default,
+                postPromotionValidation: { _ in
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            )
+        )
+    }
+    #endif
+    return PhonePadAppModel(recoveryRootURL: recoveryRootURL)
 }
 
 #if DEBUG

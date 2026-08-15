@@ -175,7 +175,16 @@ final class PhonePadTabAppModelTests: XCTestCase {
         let didCreate = await fixture.model.createTab(after: committedDocument)
 
         XCTAssertFalse(didCreate)
-        XCTAssertEqual(fixture.model.state, initialState)
+        XCTAssertEqual(fixture.model.state.tabs.map(\.id), initialState.tabs.map(\.id))
+        XCTAssertEqual(fixture.model.state.activeTabID, initialState.activeTabID)
+        XCTAssertEqual(
+            fixture.model.state.activeTab.document.text,
+            initialState.activeTab.document.text
+        )
+        XCTAssertEqual(
+            fixture.model.state.activeTab.document.recoveryState,
+            .recoveryUnavailable
+        )
         XCTAssertNotNil(fixture.model.tabTransitionError)
     }
 

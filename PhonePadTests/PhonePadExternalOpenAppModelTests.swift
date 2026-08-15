@@ -527,7 +527,7 @@ final class PhonePadExternalOpenAppModelTests: XCTestCase {
         XCTAssertFalse(opened)
         XCTAssertEqual(
             fixture.model.state.activeTab.document.recoveryState,
-            .checkpointPending
+            .recoveryUnavailable
         )
         XCTAssertNotNil(fixture.model.recoveryError)
         XCTAssertFalse(fixture.model.externalOpenCleanupRequired)

@@ -70,6 +70,8 @@
 		C0000000000000000000003E /* EditorDisplayModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004A /* EditorDisplayModels.swift */; };
 		C0000000000000000000003F /* PhonePadEditorTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004B /* PhonePadEditorTools.swift */; };
 		C00000000000000000000040 /* PhonePadEditorDisplayControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004C /* PhonePadEditorDisplayControls.swift */; };
+		C00000000000000000000041 /* PhonePadRecoveryUnavailableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004D /* PhonePadRecoveryUnavailableTests.swift */; };
+		C00000000000000000000042 /* PhonePadRecoveryUnavailable.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004E /* PhonePadRecoveryUnavailable.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -194,6 +196,8 @@
 		B0000000000000000000004A /* EditorDisplayModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorDisplayModels.swift; sourceTree = "<group>"; };
 		B0000000000000000000004B /* PhonePadEditorTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditorTools.swift; sourceTree = "<group>"; };
 		B0000000000000000000004C /* PhonePadEditorDisplayControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditorDisplayControls.swift; sourceTree = "<group>"; };
+		B0000000000000000000004D /* PhonePadRecoveryUnavailableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRecoveryUnavailableTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000004E /* PhonePadRecoveryUnavailable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRecoveryUnavailable.swift; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -307,6 +311,7 @@
 				B00000000000000000000006 /* PhonePadTextEditor.swift */,
 				B0000000000000000000004B /* PhonePadEditorTools.swift */,
 				B0000000000000000000004C /* PhonePadEditorDisplayControls.swift */,
+				B0000000000000000000004E /* PhonePadRecoveryUnavailable.swift */,
 			);
 			path = PhonePad;
 			sourceTree = "<group>";
@@ -330,6 +335,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000049 /* EditorDisplayModelsTests.swift */,
+				B0000000000000000000004D /* PhonePadRecoveryUnavailableTests.swift */,
 				B00000000000000000000014 /* FileAccessConnectorTests.swift */,
 				B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */,
 				B0000000000000000000002C /* FileConflictModelsTests.swift */,
@@ -597,6 +603,7 @@
 				C00000000000000000000006 /* PhonePadTextEditor.swift in Sources */,
 				C0000000000000000000003F /* PhonePadEditorTools.swift in Sources */,
 				C00000000000000000000040 /* PhonePadEditorDisplayControls.swift in Sources */,
+				C00000000000000000000042 /* PhonePadRecoveryUnavailable.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -620,6 +627,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C0000000000000000000003D /* EditorDisplayModelsTests.swift in Sources */,
+				C00000000000000000000041 /* PhonePadRecoveryUnavailableTests.swift in Sources */,
 				C00000000000000000000014 /* FileAccessConnectorTests.swift in Sources */,
 				C0000000000000000000003B /* ImportedCopyCleanupJournalTests.swift in Sources */,
 				C00000000000000000000026 /* FileConflictModelsTests.swift in Sources */,
