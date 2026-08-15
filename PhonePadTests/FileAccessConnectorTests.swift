@@ -1548,6 +1548,760 @@ final class FileAccessConnectorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: childURL), Data("nested data".utf8))
     }
 
+    func testTypedOpenInPlaceReturnsBoundPresentedSnapshot() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent(
+            "Typed Open.txt",
+            isDirectory: false
+        )
+        let bytes = Data("Typed durable content\n".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: documentID,
+            accessIntent: .inPlace
+        )
+
+        guard case let .bound(snapshot) = outcome else {
+            return XCTFail("Expected writable in-place File to bind, received \(outcome).")
+        }
+        XCTAssertEqual(snapshot.openedFile.text, "Typed durable content\n")
+        XCTAssertEqual(snapshot.openedFile.binding.digest, try digest(data: bytes))
+        XCTAssertEqual(
+            snapshot.openedFile.binding.locatorURL.standardizedFileURL,
+            fileURL.standardizedFileURL
+        )
+        XCTAssertTrue(registeredOpenPresenter(documentID: documentID))
+        await connector.stopPresenting(documentID: documentID)
+    }
+
+    func testTypedOpenCopyRequiredReturnsDetachedSnapshotWithoutDurableReference() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent(
+            "Copied Input.txt",
+            isDirectory: false
+        )
+        let bytes = Data("Detached copied content\n".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: { _ in
+                throw ForcedOpenDependencyError(code: 901)
+            },
+            bookmarkResolver: { _ in
+                throw ForcedOpenDependencyError(code: 902)
+            },
+            identityReader: { _ in nil },
+            writabilityReader: { _ in
+                throw ForcedOpenDependencyError(code: 903)
+            },
+            applicationInboxURL: nil
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: documentID,
+            accessIntent: .copyRequired
+        )
+
+        guard case let .detached(openedFile) = outcome else {
+            return XCTFail("Expected copy-required File to detach, received \(outcome).")
+        }
+        XCTAssertEqual(openedFile.snapshot.text, "Detached copied content\n")
+        XCTAssertEqual(openedFile.snapshot.candidate.digest, try digest(data: bytes))
+        XCTAssertNil(openedFile.snapshot.recoveryFileReference)
+        XCTAssertEqual(openedFile.reason, .copyRequired)
+        XCTAssertNil(openedFile.importedCopyCleanupToken)
+        XCTAssertFalse(registeredOpenPresenter(documentID: documentID))
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+    }
+
+    func testTypedOpenReadOnlyBookmarkableFileDetachesWithRecoveryReference() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent(
+            "Read Only.txt",
+            isDirectory: false
+        )
+        let bytes = Data("Read-only content\n".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in false },
+            applicationInboxURL: nil
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: documentID,
+            accessIntent: .inPlace
+        )
+
+        guard case let .detached(openedFile) = outcome else {
+            return XCTFail("Expected read-only File to detach, received \(outcome).")
+        }
+        XCTAssertEqual(openedFile.reason, .notWritable)
+        XCTAssertEqual(
+            openedFile.snapshot.recoveryFileReference?.cleanDigest,
+            try digest(data: bytes)
+        )
+        XCTAssertFalse(registeredOpenPresenter(documentID: documentID))
+    }
+
+    func testTypedOpenBookmarkFailureDetachesWithoutRecoveryReference() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent(
+            "Nonbookmarkable.txt",
+            isDirectory: false
+        )
+        try Data("Nonbookmarkable content\n".utf8).write(
+            to: fileURL,
+            options: .withoutOverwriting
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: { _ in
+                throw ForcedOpenDependencyError(code: 904)
+            },
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: nil
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: documentID,
+            accessIntent: .inPlace
+        )
+
+        guard case let .detached(openedFile) = outcome else {
+            return XCTFail("Expected nonbookmarkable File to detach, received \(outcome).")
+        }
+        XCTAssertEqual(openedFile.reason, .bookmarkCreationFailed(code: 904))
+        XCTAssertNil(openedFile.snapshot.recoveryFileReference)
+        XCTAssertFalse(registeredOpenPresenter(documentID: documentID))
+    }
+
+    func testCaptureImportedCopyCleanupReturnsExactDirectInboxCapability() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent(
+            "Inbox",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent(
+            "Preflight-Copy.txt",
+            isDirectory: false
+        )
+        let bytes = Data("Preliminary duplicate copy\n".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+
+        let cleanupToken = try await connector.captureImportedCopyCleanup(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID())
+        )
+
+        XCTAssertNotNil(cleanupToken)
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+        let cleanup = await connector.cleanupImportedCopy(
+            token: try XCTUnwrap(cleanupToken)
+        )
+        XCTAssertEqual(cleanup, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testRejectedBinaryImportedCopyReturnsExactCleanupCapability() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent(
+            "Disguised.txt",
+            isDirectory: false
+        )
+        let bytes = Data([
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0x41, 0x42, 0x43,
+        ])
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID()),
+            accessIntent: .copyRequired
+        )
+
+        guard case let .rejected(rejection) = outcome else {
+            return XCTFail("Expected binary imported copy rejection, received \(outcome).")
+        }
+        XCTAssertEqual(
+            rejection.error,
+            .textDecodingFailed(.unsupportedContent(.rasterImage))
+        )
+        let cleanupToken = try XCTUnwrap(
+            rejection.importedCopyCleanupToken
+        )
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+
+        let cleanup = await connector.cleanupImportedCopy(token: cleanupToken)
+
+        XCTAssertEqual(cleanup, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testRejectedUnsupportedContentImportedCopyReturnsExactCleanupCapability() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent(
+            "Inbox",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent(
+            "Formatted.rtf",
+            isDirectory: false
+        )
+        let bytes = Data("Unsupported formatted content".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID()),
+            accessIntent: .copyRequired
+        )
+
+        guard case let .rejected(rejection) = outcome else {
+            return XCTFail("Expected unsupported imported copy rejection, received \(outcome).")
+        }
+        XCTAssertEqual(
+            rejection.error,
+            .selectedFileHasUnsupportedContentType(UTType.rtf.identifier)
+        )
+        let cleanupToken = try XCTUnwrap(
+            rejection.importedCopyCleanupToken
+        )
+
+        let cleanup = await connector.cleanupImportedCopy(token: cleanupToken)
+
+        XCTAssertEqual(cleanup, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testRejectedOversizedImportedCopyReturnsExactCleanupCapability() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent(
+            "Oversized.txt",
+            isDirectory: false
+        )
+        let actualByteCount = maximumSupportedTextFileByteCount + 1
+        try Data(repeating: 0x61, count: actualByteCount).write(
+            to: fileURL,
+            options: .withoutOverwriting
+        )
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID()),
+            accessIntent: .copyRequired
+        )
+
+        guard case let .rejected(rejection) = outcome else {
+            return XCTFail("Expected oversized imported copy rejection, received \(outcome).")
+        }
+        XCTAssertEqual(
+            rejection.error,
+            .inputTooLarge(
+                actualByteCount: actualByteCount,
+                maximumByteCount: maximumSupportedTextFileByteCount
+            )
+        )
+        let cleanupToken = try XCTUnwrap(
+            rejection.importedCopyCleanupToken
+        )
+
+        let cleanup = await connector.cleanupImportedCopy(token: cleanupToken)
+
+        XCTAssertEqual(cleanup, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testRejectedOversizedImportedCopyCleanupRefusesChangedItem() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent(
+            "Inbox",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent(
+            "Changed-Oversized.txt",
+            isDirectory: false
+        )
+        let actualByteCount = maximumSupportedTextFileByteCount + 1
+        try Data(repeating: 0x61, count: actualByteCount).write(
+            to: fileURL,
+            options: .withoutOverwriting
+        )
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID()),
+            accessIntent: .copyRequired
+        )
+        guard case let .rejected(rejection) = outcome else {
+            return XCTFail("Expected oversized imported copy rejection, received \(outcome).")
+        }
+        let cleanupToken = try XCTUnwrap(
+            rejection.importedCopyCleanupToken
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1)],
+            ofItemAtPath: fileURL.path
+        )
+
+        let cleanup = await connector.cleanupImportedCopy(token: cleanupToken)
+
+        XCTAssertEqual(cleanup, .residual(.itemChanged))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testImportedCopyCleanupRequiresVerifiedInboxCapabilityAndExplicitCall() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent(
+            "Delivered.txt",
+            isDirectory: false
+        )
+        let bytes = Data("Delivered copy\n".utf8)
+        try bytes.write(to: fileURL, options: .withoutOverwriting)
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID()),
+            accessIntent: .copyRequired
+        )
+
+        guard case let .detached(openedFile) = outcome else {
+            return XCTFail("Expected imported copy to detach, received \(outcome).")
+        }
+        let token = try XCTUnwrap(openedFile.importedCopyCleanupToken)
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
+
+        let cleanup = await connector.cleanupImportedCopy(token: token)
+
+        XCTAssertEqual(cleanup, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testImportedCopyCleanupRefusesFileReplacedAfterCapabilityCreation() async throws {
+        let documentsURL = try makeTemporaryFolder()
+        let inboxURL = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: false,
+            attributes: nil
+        )
+        let fileURL = inboxURL.appendingPathComponent("Changed.txt")
+        try Data("Original copy\n".utf8).write(
+            to: fileURL,
+            options: .withoutOverwriting
+        )
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: resolveTestBookmark,
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: inboxURL
+        )
+        let outcome = try await connector.openTextFile(
+            at: fileURL,
+            documentID: DocumentID(rawValue: UUID()),
+            accessIntent: .copyRequired
+        )
+        guard case let .detached(openedFile) = outcome else {
+            return XCTFail("Expected imported copy to detach, received \(outcome).")
+        }
+        let token = try XCTUnwrap(openedFile.importedCopyCleanupToken)
+        try FileManager.default.removeItem(at: fileURL)
+        let replacement = Data("Replacement must remain\n".utf8)
+        try replacement.write(to: fileURL, options: .withoutOverwriting)
+
+        let cleanup = await connector.cleanupImportedCopy(token: token)
+
+        XCTAssertEqual(cleanup, .residual(.itemChanged))
+        XCTAssertEqual(try Data(contentsOf: fileURL), replacement)
+    }
+
+    func testActiveOpenLocatorMatcherResolvesMissingDetachedBookmarkForFastActivation() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent(
+            "Detached.txt",
+            isDirectory: false
+        )
+        try Data("Detached content\n".utf8).write(
+            to: fileURL,
+            options: .withoutOverwriting
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: { _ in
+                ResolvedFileBookmark(url: fileURL, isStale: false)
+            },
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: nil
+        )
+        let claim = ActiveFileOpenLocatorClaim.detached(
+            documentID: documentID,
+            reference: FileCollisionReference(
+                bookmark: try FileBookmark(
+                    data: makeBookmarkData(url: fileURL)
+                ),
+                identity: nil
+            )
+        )
+        try FileManager.default.removeItem(at: fileURL)
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: fileURL,
+            claims: [claim]
+        )
+
+        XCTAssertEqual(match, .missingItem(documentID))
+    }
+
+    func testPresentBoundLocatorRequiresAuthoritativeReadBeforeActivation() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let selectedURL = folderURL.appendingPathComponent(
+            "Present Bound.txt",
+            isDirectory: false
+        )
+        try Data("Present bound content\n".utf8).write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+        let data = try Data(contentsOf: selectedURL)
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: selectedURL,
+            claims: [
+                .bound(
+                    documentID: documentID,
+                    binding: try makeBinding(
+                        fileURL: selectedURL,
+                        identity: nil,
+                        data: data
+                    )
+                ),
+            ]
+        )
+
+        XCTAssertEqual(match, .requiresAuthoritativeRead([documentID]))
+    }
+
+    func testMissingExactBoundLocatorDoesNotResolveBookmarkBeforeFastActivationRecheck() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let selectedURL = folderURL.appendingPathComponent(
+            "Appearing Bound.txt",
+            isDirectory: false
+        )
+        let originalData = Data("Original bound content\n".utf8)
+        try originalData.write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let binding = try makeBinding(
+            fileURL: selectedURL,
+            identity: nil,
+            data: originalData
+        )
+        try FileManager.default.removeItem(at: selectedURL)
+        let connector = makeTypedOpenConnector(
+            bookmarkCreator: makeBookmarkData,
+            bookmarkResolver: { _ in
+                throw ForcedOpenDependencyError(code: 912)
+            },
+            identityReader: { _ in nil },
+            writabilityReader: { _ in true },
+            applicationInboxURL: nil
+        )
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: selectedURL,
+            claims: [
+                .bound(documentID: documentID, binding: binding),
+            ]
+        )
+        XCTAssertEqual(match, .missingItem(documentID))
+
+        try Data("Appeared after preliminary match\n".utf8).write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+
+        let presence = try await connector.selectedFileNodePresence(
+            at: selectedURL
+        )
+        XCTAssertEqual(presence, .present)
+    }
+
+    func testPresentDurableDetachedLocatorRequiresAuthoritativeReadBeforeActivation() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let selectedURL = folderURL.appendingPathComponent(
+            "Present Detached.txt",
+            isDirectory: false
+        )
+        try Data("Present detached content\n".utf8).write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: selectedURL,
+            claims: [
+                .detached(
+                    documentID: documentID,
+                    reference: FileCollisionReference(
+                        bookmark: try FileBookmark(
+                            data: makeBookmarkData(url: selectedURL)
+                        ),
+                        identity: nil
+                    )
+                ),
+            ]
+        )
+
+        XCTAssertEqual(match, .requiresAuthoritativeRead([documentID]))
+    }
+
+    func testActiveOpenLocatorMatcherRejectsBoundAndEphemeralResolvedToSameLocatorAsAmbiguous() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let selectedURL = folderURL.appendingPathComponent(
+            "Selected.txt",
+            isDirectory: false
+        )
+        let firstDocumentID = DocumentID(
+            rawValue: UUID(
+                uuidString: "41000000-0000-0000-0000-000000000001"
+            )!
+        )
+        let secondDocumentID = DocumentID(
+            rawValue: UUID(
+                uuidString: "41000000-0000-0000-0000-000000000002"
+            )!
+        )
+        let data = Data("Selected content\n".utf8)
+        try data.write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: selectedURL,
+            claims: [
+                .ephemeral(
+                    documentID: secondDocumentID,
+                    locatorURL: selectedURL
+                ),
+                .bound(
+                    documentID: firstDocumentID,
+                    binding: try makeBinding(
+                        fileURL: selectedURL,
+                        identity: nil,
+                        data: data
+                    )
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            match,
+            .ambiguous([firstDocumentID, secondDocumentID])
+        )
+    }
+
+    func testActiveOpenLocatorMatcherRequiresReadForExistingEphemeralLocator() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let selectedURL = folderURL.appendingPathComponent(
+            "Existing Ephemeral.txt",
+            isDirectory: false
+        )
+        try Data("Existing ephemeral content\n".utf8).write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: selectedURL,
+            claims: [
+                .ephemeral(
+                    documentID: documentID,
+                    locatorURL: selectedURL
+                ),
+            ]
+        )
+
+        XCTAssertEqual(match, .requiresAuthoritativeRead([documentID]))
+    }
+
+    func testMissingEphemeralLocatorMustRemainMissingBeforeFastActivation() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let selectedURL = folderURL.appendingPathComponent(
+            "Appearing Ephemeral.txt",
+            isDirectory: false
+        )
+        let documentID = DocumentID(rawValue: UUID())
+        let connector = FileAccessConnector(fileManager: .default)
+
+        let match = try await connector.matchActiveOpenLocators(
+            selectedURL: selectedURL,
+            claims: [
+                .ephemeral(
+                    documentID: documentID,
+                    locatorURL: selectedURL
+                ),
+            ]
+        )
+        XCTAssertEqual(match, .missingItem(documentID))
+
+        try Data("Appeared after preliminary match\n".utf8).write(
+            to: selectedURL,
+            options: .withoutOverwriting
+        )
+
+        let presence = try await connector.selectedFileNodePresence(
+            at: selectedURL
+        )
+        XCTAssertEqual(presence, .present)
+    }
+
+    func testRecoveryClaimMatcherResolvesSourceAndPendingDestination() async throws {
+        let folderURL = try makeTemporaryFolder()
+        let fileURL = folderURL.appendingPathComponent("Claimed.txt")
+        let data = Data("Claimed content\n".utf8)
+        try data.write(to: fileURL, options: .withoutOverwriting)
+        let documentID = DocumentID(rawValue: UUID())
+        let fileBookmark = try FileBookmark(data: makeBookmarkData(url: fileURL))
+        let folderBookmark = try FileBookmark(data: makeBookmarkData(url: folderURL))
+        let connector = FileAccessConnector(fileManager: .default)
+        let candidate = FileOpenCandidate(
+            locatorURL: fileURL,
+            identity: nil,
+            digest: try digest(data: data),
+            providerConflictVersions: .none
+        )
+
+        let collision = try await connector.matchRecoveryFileClaims(
+            candidate: candidate,
+            claims: [
+                .pendingSaveAs(
+                    documentID: documentID,
+                    destination: RecoverySaveAsDestination(
+                        directoryBookmark: folderBookmark,
+                        fileName: try ValidatedFileName(validating: "Claimed.txt")
+                    )
+                ),
+                .recoveryItem(
+                    documentID: documentID,
+                    reference: FileCollisionReference(
+                        bookmark: fileBookmark,
+                        identity: nil
+                    )
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            collision,
+            .item(
+                RecoveryFileOpenMatch(
+                    documentID: documentID,
+                    kinds: [.sourceFile, .pendingSaveAsDestination]
+                )
+            )
+        )
+    }
+
     func testOpenTextFileReadsExactBytesAndReturnsDurableBinding() async throws {
         let folderURL = try makeTemporaryFolder()
         let fileURL = folderURL.appendingPathComponent("Opened.txt", isDirectory: false)
@@ -2161,6 +2915,16 @@ private struct ForcedReplacementError: CustomNSError, Sendable {
     }
 }
 
+private struct ForcedOpenDependencyError: CustomNSError, Sendable {
+    static let errorDomain: String = "PhonePadTests.ForcedOpenDependency"
+
+    let code: Int
+
+    var errorCode: Int {
+        code
+    }
+}
+
 private enum CreateObservation: Equatable, Sendable {
     case success
     case failure(FileAccessConnectorError)
@@ -2228,6 +2992,43 @@ private func makeBookmarkData(url: URL) throws -> Data {
 
 private func digest(data: Data) throws -> FileDigest {
     try FileDigest(bytes: Data(SHA256.hash(data: data)))
+}
+
+private func resolveTestBookmark(
+    bookmark: FileBookmark
+) throws -> ResolvedFileBookmark {
+    var bookmarkIsStale = false
+    let url = try URL(
+        resolvingBookmarkData: bookmark.data,
+        options: [.withoutUI, .withoutImplicitStartAccessing],
+        relativeTo: nil,
+        bookmarkDataIsStale: &bookmarkIsStale
+    )
+    return ResolvedFileBookmark(url: url, isStale: bookmarkIsStale)
+}
+
+private func makeTypedOpenConnector(
+    bookmarkCreator: @escaping FileAccessConnector.BookmarkCreator,
+    bookmarkResolver: @escaping FileAccessConnector.BookmarkResolver,
+    identityReader: @escaping FileAccessConnector.FileIdentityReader,
+    writabilityReader: @escaping FileAccessConnector.FileWritabilityReader,
+    applicationInboxURL: URL?
+) -> FileAccessConnector {
+    FileAccessConnector(
+        fileManager: .default,
+        bookmarkCreator: bookmarkCreator,
+        bookmarkResolver: bookmarkResolver,
+        identityReader: identityReader,
+        replacer: replaceFile,
+        fileWritabilityReader: writabilityReader,
+        applicationInboxURL: applicationInboxURL
+    )
+}
+
+private func registeredOpenPresenter(documentID: DocumentID) -> Bool {
+    NSFileCoordinator.filePresenters.contains { presenter in
+        (presenter as? PresentedFile)?.documentID == documentID
+    }
 }
 
 private func makeBinding(

@@ -3,6 +3,8 @@ import SwiftUI
 
 @main
 struct PhonePadApp: App {
+    @UIApplicationDelegateAdaptor(PhonePadApplicationDelegate.self)
+    private var applicationDelegate
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: PhonePadAppModel
     #if DEBUG

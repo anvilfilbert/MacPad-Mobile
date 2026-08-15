@@ -576,6 +576,14 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             "Destination",
             isDirectory: true
         )
+        let inboxURL = rootURL.appendingPathComponent(
+            "Inbox",
+            isDirectory: true
+        )
+        let cleanupJournalURL = rootURL.appendingPathComponent(
+            "Cleanup Journal",
+            isDirectory: true
+        )
         let recoveryURL = rootURL.appendingPathComponent("Recovery", isDirectory: true)
         try FileManager.default.createDirectory(
             at: filesURL,
@@ -587,9 +595,30 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             withIntermediateDirectories: true,
             attributes: nil
         )
+        try FileManager.default.createDirectory(
+            at: inboxURL,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
         let fileURL = filesURL.appendingPathComponent("Lifecycle.txt")
         let originalBytes = Data("Lifecycle original\n".utf8)
         try originalBytes.write(to: fileURL, options: .withoutOverwriting)
+        let importedURL = inboxURL.appendingPathComponent(
+            "Deferred Foreground Cleanup.txt",
+            isDirectory: false
+        )
+        try Data("Deferred cleanup\n".utf8).write(
+            to: importedURL,
+            options: .withoutOverwriting
+        )
+        let queuedURL = filesURL.appendingPathComponent(
+            "Queued Foreground Open.txt",
+            isDirectory: false
+        )
+        try Data("Queued foreground Open\n".utf8).write(
+            to: queuedURL,
+            options: .withoutOverwriting
+        )
         let bookmarkGate = ConflictBookmarkGate(blockingURL: destinationURL)
         let connector = FileAccessConnector(
             fileManager: .default,
@@ -598,9 +627,16 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
             },
             bookmarkResolver: resolveConflictTestBookmark,
             identityReader: { _ in nil },
-            replacer: replaceConflictTestItem
+            replacer: replaceConflictTestItem,
+            fileWritabilityReader: { _ in true },
+            applicationInboxURL: inboxURL,
+            importedCopyCleanupJournalRootURL: cleanupJournalURL,
+            importedCopyRemover: removeImportedCopy,
+            importedCopyCleanupJournalMetadataVerifier:
+                verifyImportedCopyCleanupJournalMetadata
         )
         addTeardownBlock {
+            bookmarkGate.resume()
             await connector.pausePresenters()
         }
         let store = FileRecoveryStore(
@@ -621,6 +657,11 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
         XCTAssertTrue(didOpen)
         let documentID = model.state.activeTab.document.id
         let binding = try XCTUnwrap(model.state.activeTab.document.fileBinding)
+        let cleanupToken = try await connector.captureImportedCopyCleanup(
+            at: importedURL,
+            documentID: DocumentID(rawValue: UUID())
+        )
+        XCTAssertNotNil(cleanupToken)
         await model.sceneBecameInactive()
         XCTAssertFalse(
             NSFileCoordinator.filePresenters.contains(where: { presenter in
@@ -642,12 +683,59 @@ final class PhonePadFileConflictAppModelTests: XCTestCase {
         }
         await bookmarkGate.waitUntilEntered()
         XCTAssertTrue(model.fileSaveInProgress)
+        await model.enqueueExternalOpenRequests([
+            PhonePadExternalOpenRequest(
+                url: queuedURL,
+                accessIntent: .inPlace
+            ),
+        ])
+        XCTAssertNil(model.externalOpenCommitRequestID)
 
-        await model.sceneBecameActive()
+        let activationCompleted = expectation(
+            description: "Foreground activation completes during File action"
+        )
+        let activationTask = Task { @MainActor in
+            await model.sceneBecameActive()
+            activationCompleted.fulfill()
+        }
+        await fulfillment(
+            of: [activationCompleted],
+            timeout: 1,
+            enforceOrder: false
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: importedURL.path)
+        )
         bookmarkGate.resume()
+        await activationTask.value
         let preflight = await preflightTask.value
 
         XCTAssertNotNil(preflight)
+        let importedCopyWasReconciled = try await waitUntilFileIsMissing(
+            at: importedURL
+        )
+        XCTAssertTrue(importedCopyWasReconciled)
+        let cleanupReport = try await connector
+            .reconcileImportedCopyCleanupJournal()
+        XCTAssertEqual(cleanupReport.removed, [])
+        XCTAssertEqual(cleanupReport.alreadyAbsent, [])
+        XCTAssertEqual(cleanupReport.awaitingProtection, [])
+        XCTAssertEqual(cleanupReport.residuals, [])
+        let commitRequestID = try XCTUnwrap(
+            model.externalOpenCommitRequestID
+        )
+        let queuedOpenCompleted = await model.processNextExternalOpen(
+            after: CommittedEditorDocument(
+                documentID: model.state.activeTab.document.id,
+                text: model.state.activeTab.document.text
+            ),
+            commitRequestID: commitRequestID
+        )
+        XCTAssertTrue(queuedOpenCompleted)
+        XCTAssertEqual(
+            model.state.activeTab.document.title,
+            "Queued Foreground Open.txt"
+        )
         let presenterWasRegistered = try await waitUntilPresenterIsRegistered(
             documentID: documentID
         )
@@ -1339,6 +1427,16 @@ private func waitUntilRecoveryIsProtected(
 ) async throws -> Bool {
     for _ in 0 ..< 100 {
         if model.state.activeTab.document.recoveryState == .protectedUnsaved {
+            return true
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+}
+
+private func waitUntilFileIsMissing(at url: URL) async throws -> Bool {
+    for _ in 0 ..< 100 {
+        if !FileManager.default.fileExists(atPath: url.path) {
             return true
         }
         try await Task.sleep(for: .milliseconds(10))

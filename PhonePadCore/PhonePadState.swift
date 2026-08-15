@@ -199,6 +199,7 @@ public enum PhonePadStateError: Error, Equatable, Sendable {
     case documentMissing(DocumentID)
     case documentIsNotBound(DocumentID)
     case documentTextChanged(DocumentID)
+    case workspaceChangedSinceFileOpenPreparation(DocumentID)
     case fileBindingIdentityCollision(
         documentID: DocumentID,
         conflictingDocumentID: DocumentID
@@ -232,6 +233,8 @@ extension PhonePadStateError: LocalizedError {
             return "Document is not attached to an existing File. Use Save As."
         case .documentTextChanged:
             return "Document changed while its recovery checkpoint was being protected. Wait for the latest checkpoint and try again."
+        case let .workspaceChangedSinceFileOpenPreparation(documentID):
+            return "Tab workspace changed while File Open for Document \(documentID.rawValue.uuidString) was awaiting a decision. Keep current Documents open and retry Open."
         case .fileBindingIdentityCollision:
             return "Observed File identity belongs to another open Document. Switch to that Tab; no File binding changed."
         case .fileBindingLocatorCollision:
@@ -950,7 +953,7 @@ public func fileBindingsReferToSameFile(
     }
 }
 
-private func isPristineSoleUntitled(state: PhonePadState) -> Bool {
+func isPristineSoleUntitled(state: PhonePadState) -> Bool {
     guard state.tabs.count == 1, let document = state.tabs.first?.document else {
         return false
     }
@@ -1005,7 +1008,7 @@ private func requireTabContainingDocument(
     return tab
 }
 
-private func requireFileBindingAvailableToDocument(
+func requireFileBindingAvailableToDocument(
     state: PhonePadState,
     documentID: DocumentID,
     candidate: FileBinding

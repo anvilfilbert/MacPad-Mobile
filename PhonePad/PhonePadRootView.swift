@@ -20,17 +20,6 @@ private enum PhonePadSaveAsPresentationError: Error, LocalizedError {
     }
 }
 
-private enum PhonePadOpenPresentationError: Error, LocalizedError {
-    case committedDocumentMissing
-
-    var errorDescription: String? {
-        switch self {
-        case .committedDocumentMissing:
-            return "Editor content is no longer available for Open. Close the picker and try Open again."
-        }
-    }
-}
-
 private enum PhonePadSaveAsPresentationOrigin: Equatable {
     case explicit
     case fileConflict
@@ -70,6 +59,8 @@ private enum PhonePadFileAction {
 }
 
 struct PhonePadRootView: View {
+    @EnvironmentObject private var externalOpenSceneDelegate:
+        PhonePadExternalOpenSceneDelegate
     @ObservedObject private var model: PhonePadAppModel
     @State private var editorTransitionController: PhonePadEditorTransitionController
     @State private var recoveryIsPresented: Bool
@@ -83,7 +74,8 @@ struct PhonePadRootView: View {
     @State private var saveAsPresentationOrigin: PhonePadSaveAsPresentationOrigin
     @State private var filePickerIsPresented: Bool
     @State private var fileAction: PhonePadFileAction?
-    @State private var openCommittedDocument: CommittedEditorDocument?
+    @State private var externalOpenIntakeStarted: Bool
+    @State private var initialRecoveryRefreshFinished: Bool
 
     init(model: PhonePadAppModel) {
         self.model = model
@@ -99,7 +91,8 @@ struct PhonePadRootView: View {
         saveAsPresentationOrigin = .explicit
         filePickerIsPresented = false
         fileAction = nil
-        openCommittedDocument = nil
+        externalOpenIntakeStarted = false
+        initialRecoveryRefreshFinished = false
     }
 
     var body: some View {
@@ -179,6 +172,9 @@ struct PhonePadRootView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             fileSaveFeedback
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            externalOpenFeedback
+        }
         .sheet(isPresented: $recoveryIsPresented) {
             recoverySheet
         }
@@ -199,7 +195,254 @@ struct PhonePadRootView: View {
             )
         }
         .task {
-            await model.refreshRecoveryItems()
+            externalOpenIntakeStarted = true
+            await intakeExternalOpenBatches()
+            await model.refreshInitialRecoveryItems()
+            initialRecoveryRefreshFinished = true
+        }
+        .onReceive(
+            externalOpenSceneDelegate.$pendingExternalOpenBatches
+        ) { _ in
+            guard externalOpenIntakeStarted else {
+                return
+            }
+            Task { @MainActor in
+                await intakeExternalOpenBatches()
+            }
+        }
+        .task(id: externalOpenProcessingTrigger) {
+            guard let commitRequestID = externalOpenProcessingTrigger
+                .readyCommitRequestID else {
+                return
+            }
+            await processNextExternalOpen(
+                commitRequestID: commitRequestID
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var externalOpenFeedback: some View {
+        if let prompt = model.pendingExternalOpenRecoveryPrompt {
+            externalOpenRecoveryPrompt(prompt: prompt)
+        } else if model.externalOpenCleanupRequired {
+            externalOpenCleanupFeedback
+        } else if model.externalOpenInProgress {
+            externalOpenProgressFeedback
+        } else if let externalOpenError = model.externalOpenError {
+            externalOpenErrorFeedback(message: externalOpenError)
+        } else if let externalOpenNotice = model.externalOpenNotice {
+            Text(externalOpenNotice)
+                .font(.footnote)
+                .foregroundStyle(.black)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.orange)
+                .accessibilityIdentifier("phonepad.external-open.notice")
+        }
+    }
+
+    private var externalOpenProgressFeedback: some View {
+        ProgressView("Opening File")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(.regularMaterial)
+            .accessibilityIdentifier("phonepad.external-open.progress")
+    }
+
+    private func externalOpenErrorFeedback(
+        message: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message)
+                .font(.footnote)
+                .accessibilityIdentifier("phonepad.external-open.error")
+
+            HStack(spacing: 8) {
+                if model.externalOpenErrorRequiresDismissal {
+                    Button("Continue") {
+                        model.dismissTerminalExternalOpenError()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(
+                        "phonepad.external-open.continue"
+                    )
+                } else {
+                    Button("Retry") {
+                        Task { @MainActor in
+                            await model.retryExternalOpenCommit()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("phonepad.external-open.retry")
+
+                    Button("Cancel", role: .cancel) {
+                        cancelPendingExternalOpen()
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+                    .accessibilityIdentifier("phonepad.external-open.cancel")
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.red)
+    }
+
+    private var externalOpenCleanupFeedback: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let externalOpenError = model.externalOpenError {
+                Text(externalOpenError)
+                    .font(.footnote)
+                    .accessibilityIdentifier(
+                        "phonepad.external-open.error"
+                    )
+            }
+            if let externalOpenNotice = model.externalOpenNotice,
+               externalOpenNotice != model.externalOpenError {
+                Text(externalOpenNotice)
+                    .font(.footnote)
+                    .accessibilityIdentifier(
+                        "phonepad.external-open.notice"
+                    )
+            }
+
+            Button("Retry Cleanup") {
+                retryExternalOpenCleanup()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.white)
+            .foregroundStyle(.red)
+            .disabled(model.externalOpenInProgress)
+            .accessibilityIdentifier(
+                "phonepad.external-open.retry-cleanup"
+            )
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.red)
+    }
+
+    private func externalOpenRecoveryPrompt(
+        prompt: PendingExternalOpenRecoveryPrompt
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(prompt.title)
+                .font(.headline)
+            Text("Preserved edits exist for this File. Choose which version to open.")
+                .font(.footnote)
+
+            if let externalOpenError = model.externalOpenError {
+                Text(externalOpenError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("phonepad.external-open.error")
+            }
+
+            Button("Recover Edits") {
+                recoverPendingExternalOpen()
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity)
+            .disabled(model.externalOpenInProgress)
+            .accessibilityIdentifier(
+                "phonepad.external-open.recover-edits"
+            )
+
+            Button("Discard Edits and Open File", role: .destructive) {
+                discardRecoveryAndOpenPendingExternalOpen()
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity)
+            .disabled(model.externalOpenInProgress)
+            .accessibilityIdentifier(
+                "phonepad.external-open.discard-and-open"
+            )
+
+            Button("Cancel", role: .cancel) {
+                cancelPendingExternalOpen()
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity)
+            .disabled(model.externalOpenInProgress)
+            .accessibilityIdentifier("phonepad.external-open.cancel")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(.regularMaterial)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            "phonepad.external-open.recovery-prompt"
+        )
+    }
+
+    @MainActor
+    private func intakeExternalOpenBatches() async {
+        await intakePhonePadExternalOpenBatches(
+            from: externalOpenSceneDelegate,
+            into: model
+        )
+    }
+
+    private var externalOpenProcessingTrigger:
+        PhonePadExternalOpenProcessingTrigger {
+        PhonePadExternalOpenProcessingTrigger(
+            commitRequestID: model.externalOpenCommitRequestID,
+            initialRecoveryRefreshFinished:
+                initialRecoveryRefreshFinished,
+            saveAsIsPresented: saveAsIsPresented,
+            folderPickerIsPresented: folderPickerIsPresented,
+            filePickerIsPresented: filePickerIsPresented
+        )
+    }
+
+    @MainActor
+    private func processNextExternalOpen(
+        commitRequestID: UUID
+    ) async {
+        do {
+            let committedDocument = try editorTransitionController
+                .commitMarkedText()
+            _ = await model.processNextExternalOpen(
+                after: committedDocument,
+                commitRequestID: commitRequestID
+            )
+        } catch {
+            model.reportExternalOpenCommitFailure(
+                commitRequestID: commitRequestID,
+                error: error
+            )
+        }
+    }
+
+    private func cancelPendingExternalOpen() {
+        Task { @MainActor in
+            await model.cancelPendingExternalOpen()
+        }
+    }
+
+    private func recoverPendingExternalOpen() {
+        Task { @MainActor in
+            await model.recoverPendingExternalOpen()
+        }
+    }
+
+    private func discardRecoveryAndOpenPendingExternalOpen() {
+        Task { @MainActor in
+            await model.discardRecoveryAndOpenPendingExternalOpen()
+        }
+    }
+
+    private func retryExternalOpenCleanup() {
+        Task { @MainActor in
+            await model.retryExternalOpenCleanup()
         }
     }
 
@@ -1071,47 +1314,31 @@ struct PhonePadRootView: View {
     private func presentOpenFilePicker() {
         model.clearFileSaveFeedback()
         fileAction = .open
-        do {
-            openCommittedDocument = try editorTransitionController
-                .commitMarkedText()
-        } catch {
-            model.reportFileSaveTransitionError(error)
-            return
-        }
         filePickerIsPresented = true
     }
 
     private func selectOpenFile(_ selectedURL: URL) {
         filePickerIsPresented = false
-        fileAction = .open
-        guard let committedDocument = openCommittedDocument else {
-            model.reportFileSaveTransitionError(
-                PhonePadOpenPresentationError.committedDocumentMissing
-            )
-            return
-        }
-        openCommittedDocument = nil
+        fileAction = nil
         Task { @MainActor in
-            let opened = await model.openDocument(
-                selectedURL: selectedURL,
-                after: committedDocument
-            )
-            if opened, model.fileSaveNotice == nil {
-                fileAction = nil
-            }
+            await model.enqueueExternalOpenRequests([
+                PhonePadExternalOpenRequest(
+                    url: selectedURL,
+                    accessIntent: .inPlace
+                ),
+            ])
+            await intakeExternalOpenBatches()
         }
     }
 
     private func cancelFilePicker() {
         filePickerIsPresented = false
         fileAction = nil
-        openCommittedDocument = nil
     }
 
     private func failFilePicker(_ error: Error) {
         filePickerIsPresented = false
         fileAction = .open
-        openCommittedDocument = nil
         model.reportFileSaveTransitionError(error)
     }
 

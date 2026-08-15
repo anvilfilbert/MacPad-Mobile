@@ -26,24 +26,33 @@ public func editActiveDocumentAndCheckpoint<RecoveryStore: RecoveryStoring>(
         newText: newText,
         editedAt: editedAt
     )
-    try await recoveryStore.save(envelope: transition.envelope)
+    try await protectRecoveryEnvelope(
+        envelope: transition.envelope,
+        recoveryStore: recoveryStore
+    )
+    return try markActiveDocumentRecoveryProtected(state: transition.state)
+}
+
+public func protectRecoveryEnvelope<RecoveryStore: RecoveryStoring>(
+    envelope: RecoveryEnvelope,
+    recoveryStore: RecoveryStore
+) async throws {
+    try await recoveryStore.save(envelope: envelope)
 
     let verification = try await recoveryStore.verifyCheckpoint(
-        documentID: transition.envelope.documentID
+        documentID: envelope.documentID
     )
     guard verification.isExcludedFromBackup else {
         throw PhonePadWorkflowError.recoveryCheckpointNotExcludedFromBackup(
-            transition.envelope.documentID
+            envelope.documentID
         )
     }
 
     #if !targetEnvironment(simulator)
     guard verification.hasCompleteFileProtection else {
         throw PhonePadWorkflowError.recoveryCheckpointNotCompletelyProtected(
-            transition.envelope.documentID
+            envelope.documentID
         )
     }
     #endif
-
-    return try markActiveDocumentRecoveryProtected(state: transition.state)
 }

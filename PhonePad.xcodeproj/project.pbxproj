@@ -56,6 +56,15 @@
 		C00000000000000000000030 /* PhonePadTabCloseStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000036 /* PhonePadTabCloseStripTests.swift */; };
 		C00000000000000000000031 /* PhonePadTabCloseWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000037 /* PhonePadTabCloseWorkflowTests.swift */; };
 		C00000000000000000000032 /* PhonePadTabCloseAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000038 /* PhonePadTabCloseAppModelTests.swift */; };
+		C00000000000000000000033 /* PhonePadExternalOpenLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000039 /* PhonePadExternalOpenLifecycle.swift */; };
+		C00000000000000000000034 /* FileOpenModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003A /* FileOpenModels.swift */; };
+		C00000000000000000000035 /* PhonePadFileOpenCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003B /* PhonePadFileOpenCoreTests.swift */; };
+		C00000000000000000000036 /* PhonePadExternalOpenLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003C /* PhonePadExternalOpenLifecycleTests.swift */; };
+		C00000000000000000000037 /* PhonePadExternalOpenAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003D /* PhonePadExternalOpenAppModelTests.swift */; };
+		C00000000000000000000038 /* PhonePadExternalOpenWorkflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003E /* PhonePadExternalOpenWorkflow.swift */; };
+		C00000000000000000000039 /* PhonePadExternalOpenWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003F /* PhonePadExternalOpenWorkflowTests.swift */; };
+		C0000000000000000000003A /* ImportedCopyCleanupJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */; };
+		C0000000000000000000003B /* ImportedCopyCleanupJournalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -166,6 +175,15 @@
 		B00000000000000000000036 /* PhonePadTabCloseStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadTabCloseStripTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000037 /* PhonePadTabCloseWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadTabCloseWorkflowTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000038 /* PhonePadTabCloseAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadTabCloseAppModelTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000039 /* PhonePadExternalOpenLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadExternalOpenLifecycle.swift; sourceTree = "<group>"; };
+		B0000000000000000000003A /* FileOpenModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileOpenModels.swift; sourceTree = "<group>"; };
+		B0000000000000000000003B /* PhonePadFileOpenCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadFileOpenCoreTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000003C /* PhonePadExternalOpenLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadExternalOpenLifecycleTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000003D /* PhonePadExternalOpenAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadExternalOpenAppModelTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000003E /* PhonePadExternalOpenWorkflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadExternalOpenWorkflow.swift; sourceTree = "<group>"; };
+		B0000000000000000000003F /* PhonePadExternalOpenWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadExternalOpenWorkflowTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedCopyCleanupJournal.swift; sourceTree = "<group>"; };
+		B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedCopyCleanupJournalTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -259,11 +277,14 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000012 /* FileAccessConnector.swift */,
+				B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */,
 				B0000000000000000000002A /* PresentedFile.swift */,
 				B00000000000000000000018 /* PhonePadBoundFileWorkflow.swift */,
 				B0000000000000000000002B /* PhonePadFileConflictWorkflow.swift */,
 				B00000000000000000000017 /* PhonePadFolderPicker.swift */,
 				B00000000000000000000001 /* PhonePadApp.swift */,
+				B00000000000000000000039 /* PhonePadExternalOpenLifecycle.swift */,
+				B0000000000000000000003E /* PhonePadExternalOpenWorkflow.swift */,
 				B00000000000000000000002 /* PhonePadRootView.swift */,
 				B00000000000000000000003 /* PhonePadAppModel.swift */,
 				B0000000000000000000001C /* PhonePadSaveAsWorkflow.swift */,
@@ -281,6 +302,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000011 /* FileModels.swift */,
+				B0000000000000000000003A /* FileOpenModels.swift */,
 				B0000000000000000000001E /* SaveAsModels.swift */,
 				B0000000000000000000001A /* TextFileCodec.swift */,
 				B00000000000000000000007 /* PhonePadState.swift */,
@@ -294,6 +316,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000014 /* FileAccessConnectorTests.swift */,
+				B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */,
 				B0000000000000000000002C /* FileConflictModelsTests.swift */,
 				B00000000000000000000013 /* FileModelsTests.swift */,
 				B0000000000000000000002D /* FilePresenterConnectorTests.swift */,
@@ -301,6 +324,10 @@
 				B00000000000000000000010 /* FileRecoveryStoreRecoveryItemsTests.swift */,
 				B0000000000000000000000E /* PhonePadAppModelTests.swift */,
 				B00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift */,
+				B0000000000000000000003D /* PhonePadExternalOpenAppModelTests.swift */,
+				B0000000000000000000003C /* PhonePadExternalOpenLifecycleTests.swift */,
+				B0000000000000000000003F /* PhonePadExternalOpenWorkflowTests.swift */,
+				B0000000000000000000003B /* PhonePadFileOpenCoreTests.swift */,
 				B0000000000000000000002F /* PhonePadFileConflictAppModelTests.swift */,
 				B0000000000000000000002E /* PhonePadFileConflictWorkflowTests.swift */,
 				B00000000000000000000038 /* PhonePadTabCloseAppModelTests.swift */,
@@ -535,11 +562,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000012 /* FileAccessConnector.swift in Sources */,
+				C0000000000000000000003A /* ImportedCopyCleanupJournal.swift in Sources */,
 				C00000000000000000000024 /* PresentedFile.swift in Sources */,
 				C00000000000000000000018 /* PhonePadBoundFileWorkflow.swift in Sources */,
 				C00000000000000000000025 /* PhonePadFileConflictWorkflow.swift in Sources */,
 				C00000000000000000000017 /* PhonePadFolderPicker.swift in Sources */,
 				C00000000000000000000001 /* PhonePadApp.swift in Sources */,
+				C00000000000000000000033 /* PhonePadExternalOpenLifecycle.swift in Sources */,
+				C00000000000000000000038 /* PhonePadExternalOpenWorkflow.swift in Sources */,
 				C00000000000000000000002 /* PhonePadRootView.swift in Sources */,
 				C00000000000000000000003 /* PhonePadAppModel.swift in Sources */,
 				C0000000000000000000001C /* PhonePadSaveAsWorkflow.swift in Sources */,
@@ -557,6 +587,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000011 /* FileModels.swift in Sources */,
+				C00000000000000000000034 /* FileOpenModels.swift in Sources */,
 				C0000000000000000000001E /* SaveAsModels.swift in Sources */,
 				C0000000000000000000001A /* TextFileCodec.swift in Sources */,
 				C00000000000000000000007 /* PhonePadState.swift in Sources */,
@@ -570,6 +601,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000014 /* FileAccessConnectorTests.swift in Sources */,
+				C0000000000000000000003B /* ImportedCopyCleanupJournalTests.swift in Sources */,
 				C00000000000000000000026 /* FileConflictModelsTests.swift in Sources */,
 				C00000000000000000000013 /* FileModelsTests.swift in Sources */,
 				C00000000000000000000027 /* FilePresenterConnectorTests.swift in Sources */,
@@ -577,6 +609,10 @@
 				C00000000000000000000010 /* FileRecoveryStoreRecoveryItemsTests.swift in Sources */,
 				C0000000000000000000000E /* PhonePadAppModelTests.swift in Sources */,
 				C00000000000000000000019 /* PhonePadBoundFileWorkflowTests.swift in Sources */,
+				C00000000000000000000037 /* PhonePadExternalOpenAppModelTests.swift in Sources */,
+				C00000000000000000000036 /* PhonePadExternalOpenLifecycleTests.swift in Sources */,
+				C00000000000000000000039 /* PhonePadExternalOpenWorkflowTests.swift in Sources */,
+				C00000000000000000000035 /* PhonePadFileOpenCoreTests.swift in Sources */,
 				C00000000000000000000029 /* PhonePadFileConflictAppModelTests.swift in Sources */,
 				C00000000000000000000028 /* PhonePadFileConflictWorkflowTests.swift in Sources */,
 				C00000000000000000000032 /* PhonePadTabCloseAppModelTests.swift in Sources */,
