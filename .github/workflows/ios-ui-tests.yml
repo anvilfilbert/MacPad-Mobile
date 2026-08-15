@@ -2,6 +2,12 @@ name: iOS UI Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      test_target:
+        description: Full UI suite or one xcodebuild only-testing selector
+        required: true
+        default: PhonePadUITests
+        type: string
 
 permissions:
   contents: read
@@ -27,6 +33,8 @@ jobs:
         run: xcodebuild -version
 
       - name: Run full UI test suite
+        env:
+          TEST_TARGET: ${{ inputs.test_target }}
         run: >-
           xcodebuild
           -quiet
@@ -35,7 +43,7 @@ jobs:
           -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest'
           -resultBundlePath '${{ runner.temp }}/PhonePadUITests.xcresult'
           test
-          -only-testing:PhonePadUITests
+          "-only-testing:${TEST_TARGET}"
 
       - name: Upload failed UI test result
         if: failure()
