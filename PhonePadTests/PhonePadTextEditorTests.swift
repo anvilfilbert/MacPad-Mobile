@@ -238,6 +238,50 @@ final class PhonePadTextEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testExplicitEditingCommandsOperateOnLiveEditorAndSystemPasteboard() throws {
+        let fixture = try makeHostedEditor(
+            text: "Alpha Beta",
+            isEditable: true
+        )
+        defer {
+            destroy(fixture)
+            UIPasteboard.general.items = []
+        }
+
+        fixture.textView.selectedRange = NSRange(location: 0, length: 5)
+        try fixture.toolController.copySelection()
+        XCTAssertEqual(UIPasteboard.general.string, "Alpha")
+        XCTAssertEqual(fixture.model.text, "Alpha Beta")
+
+        try fixture.toolController.cutSelection()
+        render(fixture.controller)
+        XCTAssertEqual(fixture.model.text, "Beta")
+
+        try fixture.toolController.undo()
+        render(fixture.controller)
+        XCTAssertEqual(fixture.model.text, "Alpha Beta")
+
+        try fixture.toolController.redo()
+        render(fixture.controller)
+        XCTAssertEqual(fixture.model.text, "Beta")
+
+        UIPasteboard.general.string = "Pasted"
+        fixture.textView.selectedRange = NSRange(location: 0, length: 0)
+        try fixture.toolController.paste()
+        render(fixture.controller)
+        XCTAssertEqual(fixture.model.text, "PastedBeta")
+
+        try fixture.toolController.selectAll()
+        XCTAssertEqual(
+            fixture.textView.selectedRange,
+            NSRange(location: 0, length: fixture.textView.textStorage.length)
+        )
+        try fixture.toolController.deleteSelection()
+        render(fixture.controller)
+        XCTAssertEqual(fixture.model.text, "")
+    }
+
+    @MainActor
     func testDisplaySettingsRenderMonospacedZoomAndWordWrap() throws {
         let fixture = try makeHostedEditor(text: "one two three", isEditable: true)
         defer { destroy(fixture) }
