@@ -66,6 +66,7 @@ private enum PhonePadFileAction: Equatable {
 }
 
 struct PhonePadRootView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var externalOpenSceneDelegate:
         PhonePadExternalOpenSceneDelegate
     @ObservedObject private var model: PhonePadAppModel
@@ -178,6 +179,17 @@ struct PhonePadRootView: View {
                     .disabled(model.fileMutationDisabled)
                     .accessibilityLabel("New Tab")
                     .accessibilityIdentifier("phonepad.toolbar.new-tab")
+                }
+                if phonePadShowsOpenInToolbar(
+                    horizontalSizeClass: horizontalSizeClass
+                ) {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: presentOpenFilePicker) {
+                            Label("Open", systemImage: "folder")
+                        }
+                        .disabled(model.fileMutationDisabled)
+                        .accessibilityIdentifier("phonepad.toolbar.open")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     findMenu
@@ -2033,4 +2045,10 @@ struct PhonePadRootView: View {
             return "Original File has \(count) unresolved provider conflict version(s). PhonePad will not resolve them; use Files or the provider before saving to this File."
         }
     }
+}
+
+func phonePadShowsOpenInToolbar(
+    horizontalSizeClass: UserInterfaceSizeClass?
+) -> Bool {
+    horizontalSizeClass == .regular
 }

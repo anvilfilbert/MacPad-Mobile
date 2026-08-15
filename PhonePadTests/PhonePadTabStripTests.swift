@@ -4,6 +4,21 @@ import XCTest
 @testable import PhonePad
 
 final class PhonePadTabStripTests: XCTestCase {
+    func testRegularSizeClassShowsOpenInToolbar() {
+        XCTAssertTrue(
+            phonePadShowsOpenInToolbar(horizontalSizeClass: .regular)
+        )
+    }
+
+    func testCompactAndUnspecifiedSizeClassesKeepOpenInActions() {
+        XCTAssertFalse(
+            phonePadShowsOpenInToolbar(horizontalSizeClass: .compact)
+        )
+        XCTAssertFalse(
+            phonePadShowsOpenInToolbar(horizontalSizeClass: nil)
+        )
+    }
+
     func testReorderAccessibilityValueIncludesCurrentPosition() {
         XCTAssertEqual(
             phonePadTabAccessibilityValue(
