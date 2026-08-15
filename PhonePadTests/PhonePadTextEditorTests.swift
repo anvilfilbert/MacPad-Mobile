@@ -350,6 +350,25 @@ final class PhonePadTextEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testReadOnlyTransitionCommitsMarkedTextAndKeepsSelectionAvailable() throws {
+        let fixture = try makeHostedEditor(text: "Base", isEditable: true)
+        defer { destroy(fixture) }
+
+        fixture.textView.selectedRange = NSRange(location: 4, length: 0)
+        fixture.textView.setMarkedText(
+            " composition",
+            selectedRange: NSRange(location: 12, length: 0)
+        )
+        fixture.model.isEditable = false
+        render(fixture.controller)
+
+        XCTAssertNil(fixture.textView.markedTextRange)
+        XCTAssertEqual(fixture.model.text, "Base composition")
+        XCTAssertFalse(fixture.textView.isEditable)
+        XCTAssertTrue(fixture.textView.isSelectable)
+    }
+
+    @MainActor
     func testNativeFindAndExplicitNavigationUseRealEditorSelection() throws {
         let fixture = try makeHostedEditor(
             text: "alpha beta alpha",

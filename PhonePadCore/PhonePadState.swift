@@ -24,6 +24,7 @@ public enum TabPlacement: Equatable, Sendable {
 public enum DocumentRecoveryState: String, Codable, Equatable, Sendable {
     case clean
     case checkpointPending
+    case recoveryUnavailable
     case protectedUnsaved
 }
 
@@ -205,6 +206,8 @@ public enum PhonePadStateError: Error, Equatable, Sendable {
     case documentMissing(DocumentID)
     case documentIsNotBound(DocumentID)
     case documentTextChanged(DocumentID)
+    case documentRecoveryUnavailableRequired(DocumentID)
+    case invalidRecoveryBaseline(DocumentID)
     case workspaceChangedSinceFileOpenPreparation(DocumentID)
     case fileBindingIdentityCollision(
         documentID: DocumentID,
@@ -239,6 +242,10 @@ extension PhonePadStateError: LocalizedError {
             return "Document is not attached to an existing File. Use Save As."
         case .documentTextChanged:
             return "Document changed while its recovery checkpoint was being protected. Wait for the latest checkpoint and try again."
+        case .documentRecoveryUnavailableRequired:
+            return "Document recovery is available. Discard is only valid after a recovery checkpoint fails."
+        case .invalidRecoveryBaseline:
+            return "Last verified recovery generation is unavailable. Keep current text in memory and retry Recovery."
         case let .workspaceChangedSinceFileOpenPreparation(documentID):
             return "Tab workspace changed while File Open for Document \(documentID.rawValue.uuidString) was awaiting a decision. Keep current Documents open and retry Open."
         case .fileBindingIdentityCollision:
@@ -645,6 +652,74 @@ public func markDocumentRecoveryProtected(
         displaySettings: tab.displaySettings
     )
     return try replacingTab(state: state, with: protectedTab)
+}
+
+public func markDocumentRecoveryUnavailable(
+    state: PhonePadState,
+    documentID: DocumentID,
+    expectedText: String
+) throws -> PhonePadState {
+    let tab = try requireTabContainingDocument(
+        state: state,
+        documentID: documentID
+    )
+    guard tab.document.text == expectedText else {
+        throw PhonePadStateError.documentTextChanged(documentID)
+    }
+    let unavailableDocument = PhonePadDocument(
+        id: tab.document.id,
+        title: tab.document.title,
+        text: tab.document.text,
+        fileBinding: tab.document.fileBinding,
+        recoveryFileReference: tab.document.recoveryFileReference,
+        fileConflict: tab.document.fileConflict,
+        isUnsaved: true,
+        recoveryState: .recoveryUnavailable
+    )
+    return try replacingTab(
+        state: state,
+        with: PhonePadTab(
+            id: tab.id,
+            document: unavailableDocument,
+            displaySettings: tab.displaySettings
+        )
+    )
+}
+
+public func restoreDocumentAfterRecoveryFailure(
+    state: PhonePadState,
+    baselineState: PhonePadState,
+    documentID: DocumentID,
+    expectedUnprotectedText: String
+) throws -> PhonePadState {
+    let currentTab = try requireTabContainingDocument(
+        state: state,
+        documentID: documentID
+    )
+    guard currentTab.document.text == expectedUnprotectedText else {
+        throw PhonePadStateError.documentTextChanged(documentID)
+    }
+    guard currentTab.document.recoveryState == .recoveryUnavailable else {
+        throw PhonePadStateError.documentRecoveryUnavailableRequired(
+            documentID
+        )
+    }
+    let baselineTab = try requireTabContainingDocument(
+        state: baselineState,
+        documentID: documentID
+    )
+    guard baselineTab.document.recoveryState == .clean
+            || baselineTab.document.recoveryState == .protectedUnsaved else {
+        throw PhonePadStateError.invalidRecoveryBaseline(documentID)
+    }
+    return try replacingTab(
+        state: state,
+        with: PhonePadTab(
+            id: currentTab.id,
+            document: baselineTab.document,
+            displaySettings: currentTab.displaySettings
+        )
+    )
 }
 
 public func requireBoundFileSaveAllowed(

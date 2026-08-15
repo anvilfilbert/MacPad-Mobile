@@ -514,6 +514,47 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testRecoveryUnavailableBannerKeepsTextSelectableAndOffersSafeActions() {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_FAILURE"] = "1"
+        app.launch()
+
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        editor.typeText("U")
+
+        let banner = app.descendants(matching: .any)[
+            "phonepad.recovery-unavailable"
+        ].firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 5))
+        XCTAssertEqual(editor.value as? String, "U")
+        XCTAssertTrue(editor.isEnabled)
+
+        let message = app.staticTexts[
+            "phonepad.recovery-unavailable.message"
+        ]
+        XCTAssertTrue(message.label.contains("no verified checkpoint"))
+        XCTAssertTrue(
+            app.buttons["phonepad.recovery-unavailable.retry"].exists
+        )
+        XCTAssertFalse(
+            app.buttons["phonepad.recovery-unavailable.save"].isEnabled
+        )
+        XCTAssertTrue(
+            app.buttons["phonepad.recovery-unavailable.save-as"].isEnabled
+        )
+
+        app.buttons["phonepad.recovery-unavailable.retry"].tap()
+        XCTAssertTrue(banner.waitForExistence(timeout: 3))
+
+        app.buttons["phonepad.recovery-unavailable.discard"].tap()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(editor.value as? String, "")
+    }
+
+    @MainActor
     func testMultipleTabsSelectAndReorderUsingStableIdentifiers() {
         let app = XCUIApplication()
         app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString

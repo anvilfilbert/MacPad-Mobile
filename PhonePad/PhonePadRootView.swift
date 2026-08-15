@@ -211,7 +211,19 @@ struct PhonePadRootView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if let recoveryError = model.recoveryError {
+            if let notice = model.recoveryUnavailableNotice {
+                PhonePadRecoveryUnavailableBanner(
+                    notice: notice,
+                    saveAvailable: model.state.activeTab.document.fileBinding
+                        != nil,
+                    actionInProgress: model.fileSaveInProgress
+                        || model.activeRecoveryAction != nil,
+                    onRetryRecovery: retryActiveDocumentRecovery,
+                    onSave: saveActiveDocument,
+                    onSaveAs: presentExplicitSaveAs,
+                    onDiscard: discardRecoveryUnavailableEdits
+                )
+            } else if let recoveryError = model.recoveryError {
                 Text(recoveryError)
                     .font(.footnote)
                     .foregroundStyle(.white)
@@ -757,6 +769,18 @@ struct PhonePadRootView: View {
             editorToolError = nil
         } catch {
             editorToolError = error.localizedDescription
+        }
+    }
+
+    private func retryActiveDocumentRecovery() {
+        Task { @MainActor in
+            _ = await model.retryActiveDocumentRecovery()
+        }
+    }
+
+    private func discardRecoveryUnavailableEdits() {
+        Task { @MainActor in
+            _ = await model.discardRecoveryUnavailableEdits()
         }
     }
 

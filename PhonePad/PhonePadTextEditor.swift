@@ -135,6 +135,14 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
     func updateUIView(_ textView: UITextView, context: Context) {
         context.coordinator.update(documentID: documentID, text: $text)
         toolController.updateDocumentID(documentID)
+        if textView.isEditable,
+           !isEditable,
+           textView.markedTextRange != nil {
+            textView.unmarkText()
+            _ = context.coordinator.reconcileCommittedComposition(
+                in: textView
+            )
+        }
         textView.isEditable = isEditable
         textView.isSelectable = true
         applyDisplaySettings(displaySettings, to: textView)
