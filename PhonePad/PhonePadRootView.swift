@@ -63,6 +63,8 @@ struct PhonePadRootView: View {
         PhonePadExternalOpenSceneDelegate
     @ObservedObject private var model: PhonePadAppModel
     @State private var editorTransitionController: PhonePadEditorTransitionController
+    @State private var editorFindController: PhonePadEditorFindController
+    @State private var editorFindError: String?
     @State private var recoveryIsPresented: Bool
     @State private var discardCandidate: RecoveryDiscardCandidate?
     @State private var saveAsIsPresented: Bool
@@ -80,6 +82,8 @@ struct PhonePadRootView: View {
     init(model: PhonePadAppModel) {
         self.model = model
         editorTransitionController = PhonePadEditorTransitionController()
+        editorFindController = PhonePadEditorFindController()
+        editorFindError = nil
         recoveryIsPresented = false
         discardCandidate = nil
         saveAsIsPresented = false
@@ -122,7 +126,8 @@ struct PhonePadRootView: View {
                         }
                     ),
                     isEditable: !model.editorMutationDisabled,
-                    transitionController: editorTransitionController
+                    transitionController: editorTransitionController,
+                    findController: editorFindController
                 )
                 .disabled(model.editorInteractionDisabled)
             }
@@ -138,11 +143,25 @@ struct PhonePadRootView: View {
                     .accessibilityIdentifier("phonepad.toolbar.new-tab")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    findMenu
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     actionMenu
                 }
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("phonepad.root")
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let editorFindError {
+                Text(editorFindError)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.red)
+                    .accessibilityIdentifier("phonepad.find.error")
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let tabTransitionError = model.tabTransitionError {
@@ -443,6 +462,75 @@ struct PhonePadRootView: View {
     private func retryExternalOpenCleanup() {
         Task { @MainActor in
             await model.retryExternalOpenCleanup()
+        }
+    }
+
+    private var findMenu: some View {
+        Menu {
+            Button("Find") {
+                performEditorFindCommand {
+                    try editorFindController.presentFind()
+                }
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .accessibilityIdentifier("phonepad.find.present")
+
+            Button("Find Next") {
+                performEditorFindCommand {
+                    try editorFindController.findNext()
+                }
+            }
+            .keyboardShortcut("g", modifiers: .command)
+            .accessibilityIdentifier("phonepad.find.next")
+
+            Button("Find Previous") {
+                performEditorFindCommand {
+                    try editorFindController.findPrevious()
+                }
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .accessibilityIdentifier("phonepad.find.previous")
+
+            Divider()
+
+            Button("Show Replace") {
+                performEditorFindCommand {
+                    try editorFindController.presentReplace()
+                }
+            }
+            .accessibilityIdentifier("phonepad.find.present-replace")
+
+            Button("Replace") {
+                performEditorFindCommand {
+                    try editorFindController.replaceCurrent()
+                }
+            }
+            .disabled(model.editorMutationDisabled)
+            .accessibilityIdentifier("phonepad.find.replace")
+
+            Button("Replace All") {
+                performEditorFindCommand {
+                    try editorFindController.replaceAll()
+                }
+            }
+            .disabled(model.editorMutationDisabled)
+            .accessibilityIdentifier("phonepad.find.replace-all")
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .frame(width: 32, height: 44)
+        }
+        .accessibilityLabel("Find and Replace")
+        .accessibilityIdentifier("phonepad.find.menu")
+    }
+
+    private func performEditorFindCommand(
+        _ command: () throws -> Void
+    ) {
+        do {
+            try command()
+            editorFindError = nil
+        } catch {
+            editorFindError = error.localizedDescription
         }
     }
 

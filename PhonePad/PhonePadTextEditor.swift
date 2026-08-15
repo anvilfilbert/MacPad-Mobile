@@ -56,17 +56,20 @@ struct PhonePadTextEditor: View {
     @Binding private var text: String
     private let isEditable: Bool
     private let transitionController: PhonePadEditorTransitionController
+    private let findController: PhonePadEditorFindController
 
     init(
         documentID: DocumentID,
         text: Binding<String>,
         isEditable: Bool,
-        transitionController: PhonePadEditorTransitionController
+        transitionController: PhonePadEditorTransitionController,
+        findController: PhonePadEditorFindController
     ) {
         self.documentID = documentID
         _text = text
         self.isEditable = isEditable
         self.transitionController = transitionController
+        self.findController = findController
     }
 
     var body: some View {
@@ -74,7 +77,8 @@ struct PhonePadTextEditor: View {
             documentID: documentID,
             text: $text,
             isEditable: isEditable,
-            transitionController: transitionController
+            transitionController: transitionController,
+            findController: findController
         )
         .id(documentID)
     }
@@ -85,6 +89,7 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
     @Binding var text: String
     let isEditable: Bool
     let transitionController: PhonePadEditorTransitionController
+    let findController: PhonePadEditorFindController
 
     func makeCoordinator() -> PhonePadEditorCoordinator {
         PhonePadEditorCoordinator(documentID: documentID, text: $text)
@@ -93,6 +98,7 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
         context.coordinator.transitionController = transitionController
+        context.coordinator.findController = findController
         textView.delegate = context.coordinator
         textView.text = text
         textView.isEditable = isEditable
@@ -103,12 +109,14 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
         textView.textColor = .label
         textView.keyboardDismissMode = .interactive
         textView.alwaysBounceVertical = true
+        textView.isFindInteractionEnabled = true
         textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         textView.accessibilityIdentifier = "phonepad.editor.text-view"
         transitionController.connect(
             textView: textView,
             coordinator: context.coordinator
         )
+        findController.connect(textView: textView)
         return textView
     }
 
@@ -151,6 +159,7 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
         coordinator: PhonePadEditorCoordinator
     ) {
         coordinator.transitionController?.disconnect(coordinator: coordinator)
+        coordinator.findController?.disconnect(textView: textView)
         textView.delegate = nil
     }
 }
@@ -158,6 +167,7 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
 @MainActor
 fileprivate final class PhonePadEditorCoordinator: NSObject, UITextViewDelegate {
     fileprivate weak var transitionController: PhonePadEditorTransitionController?
+    fileprivate weak var findController: PhonePadEditorFindController?
     private var documentID: DocumentID
     private var text: Binding<String>
     private var deferredModelText: String?

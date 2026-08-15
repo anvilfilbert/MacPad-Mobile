@@ -23,6 +23,7 @@ private final class EditorTestModel: ObservableObject {
 private struct EditorHarness: View {
     @ObservedObject var model: EditorTestModel
     let transitionController: PhonePadEditorTransitionController
+    let findController: PhonePadEditorFindController
 
     var body: some View {
         let _ = model.renderGeneration
@@ -30,7 +31,8 @@ private struct EditorHarness: View {
             documentID: model.documentID,
             text: $model.text,
             isEditable: model.isEditable,
-            transitionController: transitionController
+            transitionController: transitionController,
+            findController: findController
         )
     }
 }
@@ -40,6 +42,7 @@ private struct HostedEditor {
     let model: EditorTestModel
     let controller: UIHostingController<EditorHarness>
     let transitionController: PhonePadEditorTransitionController
+    let findController: PhonePadEditorFindController
     let window: UIWindow
     let textView: UITextView
 }
@@ -229,6 +232,140 @@ final class PhonePadTextEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeFindAndExplicitNavigationUseRealEditorSelection() throws {
+        let fixture = try makeHostedEditor(
+            text: "alpha beta alpha",
+            isEditable: true
+        )
+        defer { destroy(fixture) }
+
+        XCTAssertTrue(fixture.textView.isFindInteractionEnabled)
+        try fixture.findController.presentFind()
+        render(fixture.controller)
+
+        let interaction = try XCTUnwrap(fixture.textView.findInteraction)
+        let session = try XCTUnwrap(interaction.activeFindSession)
+        interaction.searchText = "alpha"
+        session.performSearch(query: "alpha", options: nil)
+        render(fixture.controller)
+
+        XCTAssertEqual(session.resultCount, 2)
+        let firstResultIndex = session.highlightedResultIndex
+        try fixture.findController.findNext()
+        render(fixture.controller)
+        XCTAssertNotEqual(session.highlightedResultIndex, firstResultIndex)
+
+        try fixture.findController.findPrevious()
+        render(fixture.controller)
+        XCTAssertEqual(session.highlightedResultIndex, firstResultIndex)
+    }
+
+    @MainActor
+    func testExplicitReplaceChangesOnlyHighlightedNativeResult() throws {
+        let fixture = try makeHostedEditor(
+            text: "cat dog cat",
+            isEditable: true
+        )
+        defer { destroy(fixture) }
+
+        try configureFindSession(
+            fixture,
+            query: "cat",
+            replacement: "fox"
+        )
+        let undoManager = try XCTUnwrap(fixture.textView.undoManager)
+        undoManager.removeAllActions()
+        try fixture.findController.replaceCurrent()
+        render(fixture.controller)
+
+        let replacedText = try XCTUnwrap(fixture.textView.text)
+        XCTAssertTrue(
+            replacedText == "fox dog cat" || replacedText == "cat dog fox"
+        )
+        XCTAssertEqual(fixture.model.text, replacedText)
+        XCTAssertEqual(replacedText.components(separatedBy: "fox").count - 1, 1)
+        XCTAssertEqual(replacedText.components(separatedBy: "cat").count - 1, 1)
+        XCTAssertTrue(undoManager.canUndo)
+
+        undoManager.undo()
+        render(fixture.controller)
+
+        XCTAssertEqual(fixture.textView.text, "cat dog cat")
+        XCTAssertEqual(fixture.model.text, "cat dog cat")
+        XCTAssertTrue(undoManager.canRedo)
+    }
+
+    @MainActor
+    func testExplicitReplaceAllIsOneUndoGroupAndEmptySearchIsNoOp() throws {
+        let fixture = try makeHostedEditor(
+            text: "cat dog cat",
+            isEditable: true
+        )
+        defer { destroy(fixture) }
+
+        let interaction = try configureFindSession(
+            fixture,
+            query: "cat",
+            replacement: "fox"
+        )
+        let undoManager = try XCTUnwrap(fixture.textView.undoManager)
+        undoManager.removeAllActions()
+
+        try fixture.findController.replaceAll()
+        render(fixture.controller)
+
+        XCTAssertEqual(fixture.textView.text, "fox dog fox")
+        XCTAssertEqual(fixture.model.text, "fox dog fox")
+        XCTAssertTrue(undoManager.canUndo)
+
+        undoManager.undo()
+        render(fixture.controller)
+
+        XCTAssertEqual(fixture.textView.text, "cat dog cat")
+        XCTAssertEqual(fixture.model.text, "cat dog cat")
+        XCTAssertFalse(undoManager.canUndo)
+
+        interaction.searchText = ""
+        interaction.replacementText = "unused"
+        undoManager.removeAllActions()
+        try fixture.findController.replaceAll()
+        render(fixture.controller)
+
+        XCTAssertEqual(fixture.textView.text, "cat dog cat")
+        XCTAssertEqual(fixture.model.text, "cat dog cat")
+        XCTAssertFalse(undoManager.canUndo)
+    }
+
+    @MainActor
+    func testExplicitReplacementNeverReplacesActiveMarkedText() throws {
+        let fixture = try makeHostedEditor(text: "cat", isEditable: true)
+        defer { destroy(fixture) }
+
+        _ = try configureFindSession(
+            fixture,
+            query: "cat",
+            replacement: "fox"
+        )
+        fixture.textView.selectedRange = NSRange(location: 3, length: 0)
+        fixture.textView.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 1, length: 0)
+        )
+        let displayedComposition = try XCTUnwrap(fixture.textView.text)
+
+        XCTAssertThrowsError(try fixture.findController.replaceAll()) { error in
+            XCTAssertEqual(
+                error as? PhonePadEditorFindError,
+                .markedTextActive
+            )
+        }
+        render(fixture.controller)
+
+        XCTAssertEqual(fixture.textView.text, displayedComposition)
+        XCTAssertNotNil(fixture.textView.markedTextRange)
+    }
+
+    @MainActor
     private func makeHostedEditor(text: String, isEditable: Bool) throws -> HostedEditor {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
@@ -241,10 +378,12 @@ final class PhonePadTextEditorTests: XCTestCase {
             isEditable: isEditable
         )
         let transitionController = PhonePadEditorTransitionController()
+        let findController = PhonePadEditorFindController()
         let controller = UIHostingController(
             rootView: EditorHarness(
                 model: model,
-                transitionController: transitionController
+                transitionController: transitionController,
+                findController: findController
             )
         )
         let window = UIWindow(windowScene: scene)
@@ -263,9 +402,28 @@ final class PhonePadTextEditorTests: XCTestCase {
             model: model,
             controller: controller,
             transitionController: transitionController,
+            findController: findController,
             window: window,
             textView: textView
         )
+    }
+
+    @MainActor
+    private func configureFindSession(
+        _ fixture: HostedEditor,
+        query: String,
+        replacement: String
+    ) throws -> UIFindInteraction {
+        try fixture.findController.presentReplace()
+        render(fixture.controller)
+        let interaction = try XCTUnwrap(fixture.textView.findInteraction)
+        let session = try XCTUnwrap(interaction.activeFindSession)
+        interaction.searchText = query
+        interaction.replacementText = replacement
+        session.performSearch(query: query, options: nil)
+        render(fixture.controller)
+        XCTAssertGreaterThan(session.resultCount, 0)
+        return interaction
     }
 
     @MainActor
