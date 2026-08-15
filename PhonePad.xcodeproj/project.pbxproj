@@ -76,6 +76,9 @@
 		C00000000000000000000044 /* PhonePadPendingSaveReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000050 /* PhonePadPendingSaveReconciliation.swift */; };
 		C00000000000000000000045 /* PhonePadRecoveryReattachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000051 /* PhonePadRecoveryReattachmentTests.swift */; };
 		C00000000000000000000046 /* PhonePadRecoveryReattachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000052 /* PhonePadRecoveryReattachment.swift */; };
+		C00000000000000000000047 /* PhonePadPrintConnectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000053 /* PhonePadPrintConnectorTests.swift */; };
+		C00000000000000000000048 /* PhonePadPrintConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000054 /* PhonePadPrintConnector.swift */; };
+		C00000000000000000000049 /* PhonePadEditingAndPrivacyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -206,6 +209,9 @@
 		B00000000000000000000050 /* PhonePadPendingSaveReconciliation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPendingSaveReconciliation.swift; sourceTree = "<group>"; };
 		B00000000000000000000051 /* PhonePadRecoveryReattachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRecoveryReattachmentTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000052 /* PhonePadRecoveryReattachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRecoveryReattachment.swift; sourceTree = "<group>"; };
+		B00000000000000000000053 /* PhonePadPrintConnectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPrintConnectorTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000054 /* PhonePadPrintConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPrintConnector.swift; sourceTree = "<group>"; };
+		B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditingAndPrivacyControls.swift; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -300,6 +306,8 @@
 			children = (
 				B00000000000000000000012 /* FileAccessConnector.swift */,
 				B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */,
+				B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */,
+				B00000000000000000000054 /* PhonePadPrintConnector.swift */,
 				B00000000000000000000048 /* PhonePadEditorFindController.swift */,
 				B0000000000000000000002A /* PresentedFile.swift */,
 				B00000000000000000000018 /* PhonePadBoundFileWorkflow.swift */,
@@ -344,6 +352,7 @@
 		A00000000000000000000008 /* PhonePadTests */ = {
 			isa = PBXGroup;
 			children = (
+				B00000000000000000000053 /* PhonePadPrintConnectorTests.swift */,
 				B00000000000000000000051 /* PhonePadRecoveryReattachmentTests.swift */,
 				B00000000000000000000049 /* EditorDisplayModelsTests.swift */,
 				B0000000000000000000004F /* PhonePadPendingSaveReconciliationTests.swift */,
@@ -596,6 +605,8 @@
 			files = (
 				C00000000000000000000012 /* FileAccessConnector.swift in Sources */,
 				C0000000000000000000003A /* ImportedCopyCleanupJournal.swift in Sources */,
+				C00000000000000000000049 /* PhonePadEditingAndPrivacyControls.swift in Sources */,
+				C00000000000000000000048 /* PhonePadPrintConnector.swift in Sources */,
 				C0000000000000000000003C /* PhonePadEditorFindController.swift in Sources */,
 				C00000000000000000000024 /* PresentedFile.swift in Sources */,
 				C00000000000000000000018 /* PhonePadBoundFileWorkflow.swift in Sources */,
@@ -640,6 +651,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C00000000000000000000047 /* PhonePadPrintConnectorTests.swift in Sources */,
 				C00000000000000000000045 /* PhonePadRecoveryReattachmentTests.swift in Sources */,
 				C0000000000000000000003D /* EditorDisplayModelsTests.swift in Sources */,
 				C00000000000000000000043 /* PhonePadPendingSaveReconciliationTests.swift in Sources */,

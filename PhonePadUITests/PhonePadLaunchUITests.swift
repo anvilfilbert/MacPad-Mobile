@@ -7,6 +7,64 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testActionMenuExposesNativeEditingCommands() {
+        let app = launchPhonePad()
+
+        let actionMenu = app.descendants(matching: .any)[
+            "phonepad.action-menu"
+        ].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.tap()
+
+        let editingMenu = app.buttons["phonepad.edit.menu"]
+        XCTAssertTrue(editingMenu.waitForExistence(timeout: 2))
+        editingMenu.tap()
+
+        for identifier in [
+            "phonepad.edit.undo",
+            "phonepad.edit.redo",
+            "phonepad.edit.cut",
+            "phonepad.edit.copy",
+            "phonepad.edit.paste",
+            "phonepad.edit.delete",
+            "phonepad.edit.select-all",
+        ] {
+            XCTAssertTrue(
+                app.buttons[identifier].waitForExistence(timeout: 2),
+                "Missing explicit editor command: \(identifier)"
+            )
+        }
+    }
+
+    @MainActor
+    func testPrivacySheetExplainsPasteboardAndPrintBoundaries() {
+        let app = launchPhonePad()
+
+        let actionMenu = app.descendants(matching: .any)[
+            "phonepad.action-menu"
+        ].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.tap()
+
+        let privacy = app.buttons["phonepad.action-menu.privacy"]
+        XCTAssertTrue(privacy.waitForExistence(timeout: 2))
+        privacy.tap()
+
+        let sheet = app.descendants(matching: .any)[
+            "phonepad.privacy.sheet"
+        ].firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            sheet.staticTexts["phonepad.privacy.pasteboard"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            sheet.staticTexts["phonepad.privacy.print"]
+                .waitForExistence(timeout: 2)
+        )
+    }
+
+    @MainActor
     func testExternalOpenHostPublishesRealFileFixtures() throws {
         let host = launchExternalOpenHost()
 
@@ -798,6 +856,15 @@ final class PhonePadLaunchUITests: XCTestCase {
         app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "phonepad.tab.item.")
         )
+    }
+
+    @MainActor
+    private func launchPhonePad() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID()
+            .uuidString
+        app.launch()
+        return app
     }
 
     @MainActor

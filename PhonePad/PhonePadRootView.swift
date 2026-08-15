@@ -69,11 +69,15 @@ struct PhonePadRootView: View {
     @EnvironmentObject private var externalOpenSceneDelegate:
         PhonePadExternalOpenSceneDelegate
     @ObservedObject private var model: PhonePadAppModel
+    private let printConnector: PhonePadPrintConnector
     @State private var editorTransitionController: PhonePadEditorTransitionController
     @State private var editorFindController: PhonePadEditorFindController
     @StateObject private var editorToolController: PhonePadEditorToolController
     @State private var editorFindError: String?
     @State private var editorToolError: String?
+    @State private var printError: String?
+    @State private var printInProgress: Bool
+    @State private var privacyIsPresented: Bool
     @State private var goToLineIsPresented: Bool
     @State private var goToLineValue: String
     @State private var fontPickerIsPresented: Bool
@@ -93,6 +97,7 @@ struct PhonePadRootView: View {
 
     init(model: PhonePadAppModel) {
         self.model = model
+        printConnector = makePhonePadPrintConnector()
         editorTransitionController = PhonePadEditorTransitionController()
         editorFindController = PhonePadEditorFindController()
         _editorToolController = StateObject(
@@ -100,6 +105,9 @@ struct PhonePadRootView: View {
         )
         editorFindError = nil
         editorToolError = nil
+        printError = nil
+        printInProgress = false
+        privacyIsPresented = false
         goToLineIsPresented = false
         goToLineValue = ""
         fontPickerIsPresented = false
@@ -207,6 +215,17 @@ struct PhonePadRootView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let printError {
+                Text(printError)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.red)
+                    .accessibilityIdentifier("phonepad.print.error")
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if let tabTransitionError = model.tabTransitionError {
                 Text(tabTransitionError)
                     .font(.footnote)
@@ -282,6 +301,11 @@ struct PhonePadRootView: View {
                 onCancellation: cancelGoToLine,
                 onConfirmation: goToRequestedLine
             )
+        }
+        .sheet(isPresented: $privacyIsPresented) {
+            PhonePadPrivacySheet {
+                privacyIsPresented = false
+            }
         }
         .task {
             externalOpenIntakeStarted = true
@@ -606,12 +630,22 @@ struct PhonePadRootView: View {
 
     private var actionMenu: some View {
         Menu {
+            PhonePadEditingMenu(
+                toolController: editorToolController,
+                mutationDisabled: model.editorMutationDisabled,
+                interactionDisabled: model.editorInteractionDisabled,
+                onErrorMessage: { editorToolError = $0 }
+            )
+
+            Divider()
+
             Button {
                 presentOpenFilePicker()
             } label: {
                 Label("Open", systemImage: "folder")
             }
             .accessibilityIdentifier("phonepad.action-menu.open")
+            .disabled(model.fileMutationDisabled)
 
             Button {
                 saveActiveDocument()
@@ -619,6 +653,7 @@ struct PhonePadRootView: View {
                 Label("Save", systemImage: "square.and.arrow.down")
             }
             .accessibilityIdentifier("phonepad.action-menu.save")
+            .disabled(model.fileMutationDisabled)
 
             Button {
                 presentExplicitSaveAs()
@@ -626,6 +661,7 @@ struct PhonePadRootView: View {
                 Label("Save As", systemImage: "doc.badge.plus")
             }
             .accessibilityIdentifier("phonepad.action-menu.save-as")
+            .disabled(model.fileMutationDisabled)
 
             if model.activeDocumentCanLocateOriginal {
                 Button {
@@ -636,7 +672,16 @@ struct PhonePadRootView: View {
                 .accessibilityIdentifier(
                     "phonepad.action-menu.locate-original"
                 )
+                .disabled(model.fileMutationDisabled)
             }
+
+            Button {
+                printActiveDocument()
+            } label: {
+                Label("Print", systemImage: "printer")
+            }
+            .accessibilityIdentifier("phonepad.action-menu.print")
+            .disabled(model.editorInteractionDisabled || printInProgress)
 
             Button {
                 recoveryIsPresented = true
@@ -644,7 +689,22 @@ struct PhonePadRootView: View {
                 Label("Document Recovery", systemImage: "clock.arrow.circlepath")
             }
             .accessibilityIdentifier("phonepad.action-menu.document-recovery")
-            .disabled(model.recoveryItems.isEmpty && model.recoveryCatalogError == nil)
+            .disabled(
+                model.fileMutationDisabled
+                    || (
+                        model.recoveryItems.isEmpty
+                            && model.recoveryCatalogError == nil
+                    )
+            )
+
+            Divider()
+
+            Button {
+                privacyIsPresented = true
+            } label: {
+                Label("Privacy", systemImage: "hand.raised")
+            }
+            .accessibilityIdentifier("phonepad.action-menu.privacy")
 
         } label: {
             HStack(spacing: 4) {
@@ -666,8 +726,34 @@ struct PhonePadRootView: View {
         .accessibilityIdentifier("phonepad.action-menu")
         .accessibilityLabel("Actions")
         .accessibilityValue(actionMenuAccessibilityValue)
-        .disabled(model.fileMutationDisabled)
     }
+
+    private func printActiveDocument() {
+        printError = nil
+        let committedDocument: CommittedEditorDocument
+        do {
+            committedDocument = try editorTransitionController
+                .commitMarkedText()
+        } catch {
+            printError = error.localizedDescription
+            return
+        }
+
+        let printDocument = PhonePadPrintDocument(
+            title: model.state.activeTab.document.title,
+            text: committedDocument.text
+        )
+        printInProgress = true
+        Task { @MainActor in
+            defer { printInProgress = false }
+            do {
+                _ = try await printConnector.present(document: printDocument)
+            } catch {
+                printError = error.localizedDescription
+            }
+        }
+    }
+
 
     private var editorDisplayMenu: some View {
         PhonePadEditorDisplayMenu(
