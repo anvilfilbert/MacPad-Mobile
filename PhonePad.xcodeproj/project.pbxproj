@@ -81,6 +81,7 @@
 		C00000000000000000000049 /* PhonePadEditingAndPrivacyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */; };
 		C0000000000000000000004A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000056 /* Assets.xcassets */; };
 		C0000000000000000000004B /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000057 /* Localizable.xcstrings */; };
+		C0000000000000000000004C /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000058 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -216,6 +217,7 @@
 		B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditingAndPrivacyControls.swift; sourceTree = "<group>"; };
 		B00000000000000000000056 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B00000000000000000000057 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		B00000000000000000000058 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -310,6 +312,7 @@
 			children = (
 				B00000000000000000000056 /* Assets.xcassets */,
 				B00000000000000000000057 /* Localizable.xcstrings */,
+				B00000000000000000000058 /* PrivacyInfo.xcprivacy */,
 				B00000000000000000000012 /* FileAccessConnector.swift */,
 				B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */,
 				B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */,
@@ -573,6 +576,7 @@
 			files = (
 				C0000000000000000000004A /* Assets.xcassets in Resources */,
 				C0000000000000000000004B /* Localizable.xcstrings in Resources */,
+				C0000000000000000000004C /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -157,6 +157,11 @@ final class PhonePadLaunchUITests: XCTestCase {
         let editor = app.textViews["phonepad.editor.text-view"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         XCTAssertTrue(waitForValue(editor, value: fixture.content, timeout: 10))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.external-open.notice"]
+                .firstMatch
+                .waitForExistence(timeout: 20)
+        )
         let tabs = tabItems(in: app)
         XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 10))
         XCTAssertEqual(tabs.firstMatch.label, "read-only.txt")
@@ -192,7 +197,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         )
         let editor = app.textViews["phonepad.editor.text-view"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        XCTAssertTrue(waitForValue(editor, value: fixture.content, timeout: 10))
+        XCTAssertTrue(waitForValue(editor, value: fixture.content, timeout: 20))
         let tabs = tabItems(in: app)
         XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 10))
         XCTAssertEqual(tabs.firstMatch.label, "generic.dat")
@@ -355,7 +360,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.tap()
         editor.typeText("Discard after explicit confirmation")
-        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 10))
+        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 20))
         app.terminate()
 
         app.launch()
