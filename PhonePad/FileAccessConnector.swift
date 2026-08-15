@@ -1767,6 +1767,18 @@ public actor FileAccessConnector {
         )
     }
 
+    func matchingFileCollisionClaims(
+        candidate: FileOpenCandidate,
+        claims: [FileCollisionClaim]
+    ) throws -> [FileCollisionClaim] {
+        try matchingSaveAsCollisionClaims(
+            targetURL: candidate.locatorURL,
+            targetIdentity: candidate.identity,
+            claims: claims,
+            bookmarkResolver: bookmarkResolver
+        )
+    }
+
     func observePendingBoundSaveDestination(
         fileReference: RecoveryFileReference
     ) throws -> PendingSaveDestinationObservation {
