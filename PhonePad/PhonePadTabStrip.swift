@@ -147,6 +147,7 @@ struct PhonePadTabStrip: View {
                 .frame(minHeight: interactionHeight)
                 .contentShape(Rectangle())
                 .foregroundStyle(.secondary)
+                .hoverEffect(.highlight)
                 .gesture(tabReorderGesture(tabID: tab.id))
                 .allowsHitTesting(!interactionDisabled)
                 .accessibilityElement()

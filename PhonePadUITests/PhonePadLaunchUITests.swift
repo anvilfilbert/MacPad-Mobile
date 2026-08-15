@@ -817,6 +817,22 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testOpenControlAdaptsToDeviceWidthClass() {
+        let app = launchPhonePad()
+        let toolbarOpen = app.buttons["phonepad.toolbar.open"]
+        let actionMenu = app.descendants(matching: .any)[
+            "phonepad.action-menu"
+        ].firstMatch
+
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(toolbarOpen.waitForExistence(timeout: 5))
+        } else {
+            XCTAssertFalse(toolbarOpen.exists)
+        }
+    }
+
+    @MainActor
     private func waitForCount(
         _ query: XCUIElementQuery,
         count: Int,

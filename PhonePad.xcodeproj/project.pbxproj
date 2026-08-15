@@ -79,6 +79,8 @@
 		C00000000000000000000047 /* PhonePadPrintConnectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000053 /* PhonePadPrintConnectorTests.swift */; };
 		C00000000000000000000048 /* PhonePadPrintConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000054 /* PhonePadPrintConnector.swift */; };
 		C00000000000000000000049 /* PhonePadEditingAndPrivacyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */; };
+		C0000000000000000000004A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000056 /* Assets.xcassets */; };
+		C0000000000000000000004B /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000057 /* Localizable.xcstrings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -212,6 +214,8 @@
 		B00000000000000000000053 /* PhonePadPrintConnectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPrintConnectorTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000054 /* PhonePadPrintConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPrintConnector.swift; sourceTree = "<group>"; };
 		B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditingAndPrivacyControls.swift; sourceTree = "<group>"; };
+		B00000000000000000000056 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B00000000000000000000057 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -304,6 +308,8 @@
 		A00000000000000000000006 /* PhonePad */ = {
 			isa = PBXGroup;
 			children = (
+				B00000000000000000000056 /* Assets.xcassets */,
+				B00000000000000000000057 /* Localizable.xcstrings */,
 				B00000000000000000000012 /* FileAccessConnector.swift */,
 				B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */,
 				B00000000000000000000055 /* PhonePadEditingAndPrivacyControls.swift */,
@@ -565,6 +571,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0000000000000000000004A /* Assets.xcassets in Resources */,
+				C0000000000000000000004B /* Localizable.xcstrings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
