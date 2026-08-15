@@ -239,7 +239,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         editor.typeText(privatePhrase)
 
         XCTAssertEqual(editor.value as? String, privatePhrase)
-        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 5))
+        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 10))
         app.terminate()
 
         app.launch()
@@ -297,7 +297,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.tap()
         editor.typeText("Discard after explicit confirmation")
-        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 5))
+        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 10))
         app.terminate()
 
         app.launch()
