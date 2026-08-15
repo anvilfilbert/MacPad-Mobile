@@ -852,8 +852,8 @@ final class PhonePadExternalOpenAppModelTests: XCTestCase {
         let sourceFile = try decodeSupportedTextFile(
             data: Data(sourceText.utf8)
         )
-        let destinationFile = try decodeSupportedTextFile(
-            data: Data(destinationText.utf8)
+        let pendingIntendedFile = try decodeSupportedTextFile(
+            data: Data("Different intended Save As output\n".utf8)
         )
         let documentID = DocumentID(rawValue: UUID())
         let envelope = try RecoveryEnvelope(
@@ -875,7 +875,7 @@ final class PhonePadExternalOpenAppModelTests: XCTestCase {
                 lineEnding: sourceFile.lineEnding
             ),
             pendingSave: RecoveryPendingSave(
-                intendedOutputDigest: destinationFile.digest,
+                intendedOutputDigest: pendingIntendedFile.digest,
                 destination: .saveAs(
                     RecoverySaveAsDestination(
                         directoryBookmark: try FileBookmark(
@@ -915,6 +915,7 @@ final class PhonePadExternalOpenAppModelTests: XCTestCase {
             recoveryStore: recoveryStore
         )
         await model.refreshRecoveryItems()
+        XCTAssertEqual(model.recoveryItems.first?.status, .saveResultUnresolved)
         let recovered = await model.recoverRecovery(
             documentID: documentID,
             after: committedActiveDocument(model: model)

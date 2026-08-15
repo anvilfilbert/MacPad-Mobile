@@ -4211,7 +4211,10 @@ final class PhonePadAppModel: ObservableObject {
 
     private func loadRecoveryItems() async {
         do {
-            let storedItems = try await recoveryStore.recoveryItems()
+            let storedItems = try await reconcilePendingSaveRecoveryItems(
+                recoveryStore: recoveryStore,
+                fileAccessConnector: fileAccessConnector
+            )
             let openDocumentIDs = Set(state.tabs.map(\.document.id))
             recoveryItems = storedItems.filter {
                 !openDocumentIDs.contains($0.documentID)
@@ -4266,7 +4269,7 @@ final class PhonePadAppModel: ObservableObject {
             }) else {
                 throw PhonePadRecoveryActionError.recoveryItemMissing
             }
-            guard summary.status == .recoverable else {
+            guard summary.status.allowsRecovery else {
                 throw PhonePadRecoveryActionError.recoveryItemCannotBeRecovered
             }
             guard let envelope = try await recoveryStore.load(documentID: documentID) else {

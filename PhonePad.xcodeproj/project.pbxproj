@@ -72,6 +72,8 @@
 		C00000000000000000000040 /* PhonePadEditorDisplayControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004C /* PhonePadEditorDisplayControls.swift */; };
 		C00000000000000000000041 /* PhonePadRecoveryUnavailableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004D /* PhonePadRecoveryUnavailableTests.swift */; };
 		C00000000000000000000042 /* PhonePadRecoveryUnavailable.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004E /* PhonePadRecoveryUnavailable.swift */; };
+		C00000000000000000000043 /* PhonePadPendingSaveReconciliationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000004F /* PhonePadPendingSaveReconciliationTests.swift */; };
+		C00000000000000000000044 /* PhonePadPendingSaveReconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000050 /* PhonePadPendingSaveReconciliation.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -198,6 +200,8 @@
 		B0000000000000000000004C /* PhonePadEditorDisplayControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditorDisplayControls.swift; sourceTree = "<group>"; };
 		B0000000000000000000004D /* PhonePadRecoveryUnavailableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRecoveryUnavailableTests.swift; sourceTree = "<group>"; };
 		B0000000000000000000004E /* PhonePadRecoveryUnavailable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadRecoveryUnavailable.swift; sourceTree = "<group>"; };
+		B0000000000000000000004F /* PhonePadPendingSaveReconciliationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPendingSaveReconciliationTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000050 /* PhonePadPendingSaveReconciliation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadPendingSaveReconciliation.swift; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -302,6 +306,7 @@
 				B0000000000000000000003E /* PhonePadExternalOpenWorkflow.swift */,
 				B00000000000000000000002 /* PhonePadRootView.swift */,
 				B00000000000000000000003 /* PhonePadAppModel.swift */,
+				B00000000000000000000050 /* PhonePadPendingSaveReconciliation.swift */,
 				B0000000000000000000001C /* PhonePadSaveAsWorkflow.swift */,
 				B00000000000000000000015 /* PhonePadSaveWorkflow.swift */,
 				B00000000000000000000034 /* PhonePadTabCloseWorkflow.swift */,
@@ -335,6 +340,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000049 /* EditorDisplayModelsTests.swift */,
+				B0000000000000000000004F /* PhonePadPendingSaveReconciliationTests.swift */,
 				B0000000000000000000004D /* PhonePadRecoveryUnavailableTests.swift */,
 				B00000000000000000000014 /* FileAccessConnectorTests.swift */,
 				B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */,
@@ -594,6 +600,7 @@
 				C00000000000000000000038 /* PhonePadExternalOpenWorkflow.swift in Sources */,
 				C00000000000000000000002 /* PhonePadRootView.swift in Sources */,
 				C00000000000000000000003 /* PhonePadAppModel.swift in Sources */,
+				C00000000000000000000044 /* PhonePadPendingSaveReconciliation.swift in Sources */,
 				C0000000000000000000001C /* PhonePadSaveAsWorkflow.swift in Sources */,
 				C00000000000000000000015 /* PhonePadSaveWorkflow.swift in Sources */,
 				C0000000000000000000002E /* PhonePadTabCloseWorkflow.swift in Sources */,
@@ -627,6 +634,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C0000000000000000000003D /* EditorDisplayModelsTests.swift in Sources */,
+				C00000000000000000000043 /* PhonePadPendingSaveReconciliationTests.swift in Sources */,
 				C00000000000000000000041 /* PhonePadRecoveryUnavailableTests.swift in Sources */,
 				C00000000000000000000014 /* FileAccessConnectorTests.swift in Sources */,
 				C0000000000000000000003B /* ImportedCopyCleanupJournalTests.swift in Sources */,

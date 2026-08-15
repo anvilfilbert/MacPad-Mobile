@@ -341,7 +341,9 @@ public actor FileRecoveryStore: RecoveryStoring {
                         documentID: documentID,
                         title: recoveryDisplayTitle(storedEnvelope.envelope.title),
                         lastEdited: .available(storedEnvelope.envelope.editedAt),
-                        status: .recoverable
+                        status: .recoverable,
+                        requiresPendingSaveReconciliation:
+                            storedEnvelope.envelope.pendingSave != nil
                     )
                 )
             } catch let error as FileRecoveryStoreError {

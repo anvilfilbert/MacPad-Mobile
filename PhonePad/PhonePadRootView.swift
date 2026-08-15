@@ -1698,7 +1698,7 @@ struct PhonePadRootView: View {
                 .foregroundStyle(recoveryStatusColor(item.status))
 
             HStack {
-                if item.status == .recoverable {
+                if item.status.allowsRecovery {
                     Button("Recover") {
                         Task { @MainActor in
                             let committedDocument: CommittedEditorDocument
@@ -1841,6 +1841,8 @@ struct PhonePadRootView: View {
         switch status {
         case .recoverable:
             return "Unsaved"
+        case .saveResultUnresolved:
+            return "Save result unresolved"
         case .unavailable:
             return "Recovery temporarily unavailable"
         case .corrupt:
@@ -1854,7 +1856,7 @@ struct PhonePadRootView: View {
         switch status {
         case .recoverable:
             return .secondary
-        case .unavailable, .corrupt, .unsupportedVersion:
+        case .saveResultUnresolved, .unavailable, .corrupt, .unsupportedVersion:
             return .red
         }
     }
