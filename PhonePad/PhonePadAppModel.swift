@@ -248,6 +248,14 @@ private enum PhonePadExternalOpenActionError: Error, LocalizedError {
     }
 }
 
+private enum PhonePadEditorDisplayActionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+
+    var errorDescription: String? {
+        "Display settings cannot change while another File, recovery, or Tab action is running. Wait for it to finish and retry."
+    }
+}
+
 private enum RecoveryCheckpointPersistenceOutcome: Equatable {
     case persisted
     case superseded
@@ -608,6 +616,48 @@ final class PhonePadAppModel: ObservableObject {
 
     var activeText: String {
         state.activeTab.document.text
+    }
+
+    var activeDisplaySettings: PhonePadTabDisplaySettings {
+        state.activeTab.displaySettings
+    }
+
+    func chooseActiveTabFont(_ fontFamily: PhonePadFontFamily) throws {
+        try requireDisplaySettingsMutationAvailable()
+        state = try setActiveTabFontFamily(
+            state: state,
+            fontFamily: fontFamily
+        )
+    }
+
+    func chooseActiveTabZoom(_ zoomPercent: Int) throws {
+        try requireDisplaySettingsMutationAvailable()
+        state = try setActiveTabZoomPercent(
+            state: state,
+            zoomPercent: zoomPercent
+        )
+    }
+
+    func toggleActiveTabWordWrap() throws {
+        try requireDisplaySettingsMutationAvailable()
+        state = try setActiveTabWordWrapEnabled(
+            state: state,
+            isEnabled: !state.activeTab.displaySettings.wordWrapEnabled
+        )
+    }
+
+    func toggleActiveTabStatusVisibility() throws {
+        try requireDisplaySettingsMutationAvailable()
+        state = try setActiveTabStatusVisible(
+            state: state,
+            isVisible: !state.activeTab.displaySettings.statusVisible
+        )
+    }
+
+    private func requireDisplaySettingsMutationAvailable() throws {
+        guard !fileMutationDisabled else {
+            throw PhonePadEditorDisplayActionError.actionAlreadyInProgress
+        }
     }
 
     var activeFileConflict: FileConflict? {

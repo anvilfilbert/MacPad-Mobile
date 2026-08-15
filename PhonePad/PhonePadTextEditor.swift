@@ -55,21 +55,27 @@ struct PhonePadTextEditor: View {
     private let documentID: DocumentID
     @Binding private var text: String
     private let isEditable: Bool
+    private let displaySettings: PhonePadTabDisplaySettings
     private let transitionController: PhonePadEditorTransitionController
     private let findController: PhonePadEditorFindController
+    private let toolController: PhonePadEditorToolController
 
     init(
         documentID: DocumentID,
         text: Binding<String>,
         isEditable: Bool,
+        displaySettings: PhonePadTabDisplaySettings,
         transitionController: PhonePadEditorTransitionController,
-        findController: PhonePadEditorFindController
+        findController: PhonePadEditorFindController,
+        toolController: PhonePadEditorToolController
     ) {
         self.documentID = documentID
         _text = text
         self.isEditable = isEditable
+        self.displaySettings = displaySettings
         self.transitionController = transitionController
         self.findController = findController
+        self.toolController = toolController
     }
 
     var body: some View {
@@ -77,8 +83,10 @@ struct PhonePadTextEditor: View {
             documentID: documentID,
             text: $text,
             isEditable: isEditable,
+            displaySettings: displaySettings,
             transitionController: transitionController,
-            findController: findController
+            findController: findController,
+            toolController: toolController
         )
         .id(documentID)
     }
@@ -88,8 +96,10 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
     let documentID: DocumentID
     @Binding var text: String
     let isEditable: Bool
+    let displaySettings: PhonePadTabDisplaySettings
     let transitionController: PhonePadEditorTransitionController
     let findController: PhonePadEditorFindController
+    let toolController: PhonePadEditorToolController
 
     func makeCoordinator() -> PhonePadEditorCoordinator {
         PhonePadEditorCoordinator(documentID: documentID, text: $text)
@@ -99,12 +109,12 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
         let textView = UITextView()
         context.coordinator.transitionController = transitionController
         context.coordinator.findController = findController
+        context.coordinator.toolController = toolController
         textView.delegate = context.coordinator
         textView.text = text
         textView.isEditable = isEditable
         textView.isSelectable = true
-        textView.font = UIFont.preferredFont(forTextStyle: .body)
-        textView.adjustsFontForContentSizeCategory = true
+        textView.adjustsFontForContentSizeCategory = false
         textView.backgroundColor = .systemBackground
         textView.textColor = .label
         textView.keyboardDismissMode = .interactive
@@ -117,13 +127,17 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
             coordinator: context.coordinator
         )
         findController.connect(textView: textView)
+        toolController.connect(textView: textView, documentID: documentID)
+        applyDisplaySettings(displaySettings, to: textView)
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
         context.coordinator.update(documentID: documentID, text: $text)
+        toolController.updateDocumentID(documentID)
         textView.isEditable = isEditable
         textView.isSelectable = true
+        applyDisplaySettings(displaySettings, to: textView)
 
         if textView.markedTextRange != nil {
             context.coordinator.deferModelText(text, displayedText: textView.text ?? "")
@@ -160,7 +174,58 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
     ) {
         coordinator.transitionController?.disconnect(coordinator: coordinator)
         coordinator.findController?.disconnect(textView: textView)
+        coordinator.toolController?.disconnect(textView: textView)
         textView.delegate = nil
+    }
+
+    private func applyDisplaySettings(
+        _ settings: PhonePadTabDisplaySettings,
+        to textView: UITextView
+    ) {
+        let dynamicBasePointSize = UIFontMetrics(forTextStyle: .body)
+            .scaledValue(for: 14, compatibleWith: textView.traitCollection)
+        let pointSize: CGFloat
+        do {
+            pointSize = CGFloat(
+                try renderedEditorPointSize(
+                    dynamicTypeBasePointSize: Double(dynamicBasePointSize),
+                    zoomPercent: settings.zoomPercent
+                )
+            )
+        } catch {
+            preconditionFailure(error.localizedDescription)
+        }
+        switch settings.fontFamily {
+        case .monospacedSystem:
+            textView.font = UIFont.monospacedSystemFont(
+                ofSize: pointSize,
+                weight: .regular
+            )
+        case let .named(postScriptName):
+            guard let font = UIFont(
+                name: postScriptName,
+                size: pointSize
+            ) else {
+                preconditionFailure(
+                    "Selected editor font is no longer available: \(postScriptName)"
+                )
+            }
+            textView.font = font
+        }
+
+        if settings.wordWrapEnabled {
+            textView.textContainer.widthTracksTextView = true
+            textView.alwaysBounceHorizontal = false
+            textView.showsHorizontalScrollIndicator = false
+        } else {
+            textView.textContainer.widthTracksTextView = false
+            textView.textContainer.size = CGSize(
+                width: CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            textView.alwaysBounceHorizontal = true
+            textView.showsHorizontalScrollIndicator = true
+        }
     }
 }
 
@@ -168,6 +233,7 @@ private struct PhonePadTextEditorRepresentable: UIViewRepresentable {
 fileprivate final class PhonePadEditorCoordinator: NSObject, UITextViewDelegate {
     fileprivate weak var transitionController: PhonePadEditorTransitionController?
     fileprivate weak var findController: PhonePadEditorFindController?
+    fileprivate weak var toolController: PhonePadEditorToolController?
     private var documentID: DocumentID
     private var text: Binding<String>
     private var deferredModelText: String?
@@ -181,6 +247,7 @@ fileprivate final class PhonePadEditorCoordinator: NSObject, UITextViewDelegate 
     func update(documentID: DocumentID, text: Binding<String>) {
         self.documentID = documentID
         self.text = text
+        toolController?.updateDocumentID(documentID)
     }
 
     func deferModelText(_ modelText: String, displayedText: String) {
@@ -226,6 +293,11 @@ fileprivate final class PhonePadEditorCoordinator: NSObject, UITextViewDelegate 
         }
 
         _ = reconcileCommittedComposition(in: textView)
+        toolController?.updateSelection(
+            documentID: documentID,
+            text: textView.text ?? "",
+            utf16Offset: textView.selectedRange.location
+        )
     }
 
     func synchronizeForDocumentTransition(
@@ -235,6 +307,11 @@ fileprivate final class PhonePadEditorCoordinator: NSObject, UITextViewDelegate 
         deferredModelText = nil
         let committedText = textView.text ?? ""
         synchronizeBinding(with: textView)
+        toolController?.updateSelection(
+            documentID: documentID,
+            text: committedText,
+            utf16Offset: textView.selectedRange.location
+        )
         return CommittedEditorDocument(
             documentID: documentID,
             text: committedText

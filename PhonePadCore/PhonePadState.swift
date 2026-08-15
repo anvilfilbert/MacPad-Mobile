@@ -121,10 +121,16 @@ public struct PhonePadDocument: Equatable, Sendable {
 public struct PhonePadTab: Equatable, Sendable {
     public let id: TabID
     public let document: PhonePadDocument
+    public let displaySettings: PhonePadTabDisplaySettings
 
-    init(id: TabID, document: PhonePadDocument) {
+    init(
+        id: TabID,
+        document: PhonePadDocument,
+        displaySettings: PhonePadTabDisplaySettings
+    ) {
         self.id = id
         self.document = document
+        self.displaySettings = displaySettings
     }
 }
 
@@ -332,7 +338,11 @@ public func makeInitialPhonePadState(
         isUnsaved: false,
         recoveryState: .clean
     )
-    let tab = PhonePadTab(id: tabID, document: document)
+    let tab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     return PhonePadState(tabs: [tab], activeTabID: tabID)
 }
 
@@ -354,7 +364,11 @@ public func createUntitledTab(
         isUnsaved: false,
         recoveryState: .clean
     )
-    let tab = PhonePadTab(id: tabID, document: document)
+    let tab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     return PhonePadState(
         tabs: state.tabs + [tab],
         activeTabID: tab.id
@@ -543,7 +557,11 @@ public func recoverDocument(
         isUnsaved: true,
         recoveryState: .protectedUnsaved
     )
-    let recoveredTab = PhonePadTab(id: tabID, document: document)
+    let recoveredTab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     return PhonePadState(
         tabs: state.tabs + [recoveredTab],
         activeTabID: recoveredTab.id
@@ -570,7 +588,11 @@ public func beginActiveDocumentEdit(
         isUnsaved: true,
         recoveryState: .checkpointPending
     )
-    let editedTab = PhonePadTab(id: activeTab.id, document: editedDocument)
+    let editedTab = PhonePadTab(
+        id: activeTab.id,
+        document: editedDocument,
+        displaySettings: activeTab.displaySettings
+    )
     let editedState = try replacingActiveTab(state: state, with: editedTab)
     let envelope = try RecoveryEnvelope(
         formatVersion: RecoveryEnvelope.currentFormatVersion,
@@ -617,7 +639,11 @@ public func markDocumentRecoveryProtected(
         isUnsaved: tab.document.isUnsaved,
         recoveryState: .protectedUnsaved
     )
-    let protectedTab = PhonePadTab(id: tab.id, document: protectedDocument)
+    let protectedTab = PhonePadTab(
+        id: tab.id,
+        document: protectedDocument,
+        displaySettings: tab.displaySettings
+    )
     return try replacingTab(state: state, with: protectedTab)
 }
 
@@ -654,7 +680,11 @@ public func markActiveDocumentSavedToBoundFile(
         encodedFile: encodedFile,
         fileBinding: fileBinding
     )
-    let savedTab = PhonePadTab(id: activeTab.id, document: savedDocument)
+    let savedTab = PhonePadTab(
+        id: activeTab.id,
+        document: savedDocument,
+        displaySettings: activeTab.displaySettings
+    )
     return try replacingActiveTab(state: state, with: savedTab)
 }
 
@@ -669,7 +699,11 @@ public func markActiveDocumentSavedAsBoundFile(
         encodedFile: encodedFile,
         fileBinding: fileBinding
     )
-    let savedTab = PhonePadTab(id: activeTab.id, document: savedDocument)
+    let savedTab = PhonePadTab(
+        id: activeTab.id,
+        document: savedDocument,
+        displaySettings: activeTab.displaySettings
+    )
     return try replacingActiveTab(state: state, with: savedTab)
 }
 
@@ -687,7 +721,11 @@ public func markActiveDocumentSavedToDetachedFile(
         isUnsaved: false,
         recoveryState: .clean
     )
-    let savedTab = PhonePadTab(id: activeTab.id, document: savedDocument)
+    let savedTab = PhonePadTab(
+        id: activeTab.id,
+        document: savedDocument,
+        displaySettings: activeTab.displaySettings
+    )
     return try replacingActiveTab(state: state, with: savedTab)
 }
 
@@ -715,7 +753,11 @@ public func markDocumentFileConflict(
     )
     return try replacingTab(
         state: state,
-        with: PhonePadTab(id: tab.id, document: conflictedDocument)
+        with: PhonePadTab(
+            id: tab.id,
+            document: conflictedDocument,
+            displaySettings: tab.displaySettings
+        )
     )
 }
 
@@ -764,7 +806,11 @@ public func reconcileBoundDocument(
     )
     return try replacingTab(
         state: state,
-        with: PhonePadTab(id: tab.id, document: reconciledDocument)
+        with: PhonePadTab(
+            id: tab.id,
+            document: reconciledDocument,
+            displaySettings: tab.displaySettings
+        )
     )
 }
 
@@ -807,7 +853,11 @@ public func reloadDocumentFromBoundFile(
     )
     return try replacingTab(
         state: state,
-        with: PhonePadTab(id: tab.id, document: reloadedDocument)
+        with: PhonePadTab(
+            id: tab.id,
+            document: reloadedDocument,
+            displaySettings: tab.displaySettings
+        )
     )
 }
 
@@ -871,7 +921,8 @@ public func openObservedBoundDocument(
         var tabs = state.tabs
         tabs[locatorMatchIndex] = PhonePadTab(
             id: locatorTab.id,
-            document: conflictedDocument
+            document: conflictedDocument,
+            displaySettings: locatorTab.displaySettings
         )
         return PhonePadState(tabs: tabs, activeTabID: locatorTab.id)
     }
@@ -908,7 +959,8 @@ public func openObservedBoundDocument(
         var tabs = state.tabs
         tabs[existingIndex] = PhonePadTab(
             id: existingTab.id,
-            document: reconciledDocument
+            document: reconciledDocument,
+            displaySettings: existingTab.displaySettings
         )
         return PhonePadState(tabs: tabs, activeTabID: existingTab.id)
     }
@@ -931,7 +983,11 @@ public func openObservedBoundDocument(
         isUnsaved: false,
         recoveryState: .clean
     )
-    let tab = PhonePadTab(id: tabID, document: document)
+    let tab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     guard !isPristineSoleUntitled(state: state) else {
         return PhonePadState(tabs: [tab], activeTabID: tab.id)
     }

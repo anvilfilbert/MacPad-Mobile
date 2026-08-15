@@ -1,4 +1,4 @@
-import PhonePadCore
+@testable import PhonePadCore
 import SwiftUI
 import UIKit
 import XCTest
@@ -9,12 +9,14 @@ private final class EditorTestModel: ObservableObject {
     @Published var documentID: DocumentID
     @Published var text: String
     @Published var isEditable: Bool
+    @Published var displaySettings: PhonePadTabDisplaySettings
     @Published var renderGeneration: UInt64
 
     init(documentID: DocumentID, text: String, isEditable: Bool) {
         self.documentID = documentID
         self.text = text
         self.isEditable = isEditable
+        displaySettings = .initial
         renderGeneration = 0
     }
 }
@@ -24,6 +26,7 @@ private struct EditorHarness: View {
     @ObservedObject var model: EditorTestModel
     let transitionController: PhonePadEditorTransitionController
     let findController: PhonePadEditorFindController
+    let toolController: PhonePadEditorToolController
 
     var body: some View {
         let _ = model.renderGeneration
@@ -31,8 +34,10 @@ private struct EditorHarness: View {
             documentID: model.documentID,
             text: $model.text,
             isEditable: model.isEditable,
+            displaySettings: model.displaySettings,
             transitionController: transitionController,
-            findController: findController
+            findController: findController,
+            toolController: toolController
         )
     }
 }
@@ -43,6 +48,7 @@ private struct HostedEditor {
     let controller: UIHostingController<EditorHarness>
     let transitionController: PhonePadEditorTransitionController
     let findController: PhonePadEditorFindController
+    let toolController: PhonePadEditorToolController
     let window: UIWindow
     let textView: UITextView
 }
@@ -232,6 +238,118 @@ final class PhonePadTextEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testDisplaySettingsRenderMonospacedZoomAndWordWrap() throws {
+        let fixture = try makeHostedEditor(text: "one two three", isEditable: true)
+        defer { destroy(fixture) }
+
+        let expectedDefaultPointSize = try renderedEditorPointSize(
+            dynamicTypeBasePointSize: Double(
+                UIFontMetrics.default.scaledValue(for: 14)
+            ),
+            zoomPercent: 100
+        )
+        XCTAssertEqual(
+            Double(try XCTUnwrap(fixture.textView.font).pointSize),
+            expectedDefaultPointSize,
+            accuracy: 0.01
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(fixture.textView.font)
+                .fontDescriptor.symbolicTraits.contains(.traitMonoSpace)
+        )
+        XCTAssertTrue(fixture.textView.textContainer.widthTracksTextView)
+
+        fixture.model.displaySettings = PhonePadTabDisplaySettings(
+            fontFamily: .monospacedSystem,
+            zoomPercent: 200,
+            wordWrapEnabled: false,
+            statusVisible: true
+        )
+        render(fixture.controller)
+
+        let expectedZoomedPointSize = try renderedEditorPointSize(
+            dynamicTypeBasePointSize: Double(
+                UIFontMetrics.default.scaledValue(for: 14)
+            ),
+            zoomPercent: 200
+        )
+        XCTAssertEqual(
+            Double(try XCTUnwrap(fixture.textView.font).pointSize),
+            expectedZoomedPointSize,
+            accuracy: 0.01
+        )
+        XCTAssertFalse(fixture.textView.textContainer.widthTracksTextView)
+        XCTAssertTrue(fixture.textView.alwaysBounceHorizontal)
+    }
+
+    @MainActor
+    func testSelectionStatusAndGoToLineUseRealEditorOffsets() throws {
+        let fixture = try makeHostedEditor(
+            text: "first\r\nsecond\nthird",
+            isEditable: true
+        )
+        defer { destroy(fixture) }
+
+        fixture.textView.selectedRange = NSRange(location: 9, length: 0)
+        render(fixture.controller)
+
+        XCTAssertEqual(
+            fixture.toolController.selection,
+            PhonePadEditorSelection(
+                documentID: fixture.model.documentID,
+                position: EditorTextPosition(line: 2, column: 3)
+            )
+        )
+
+        try fixture.toolController.goToLine(oneBasedLine: 3)
+        render(fixture.controller)
+
+        XCTAssertEqual(
+            fixture.textView.selectedRange,
+            NSRange(location: 14, length: 0)
+        )
+        XCTAssertEqual(
+            fixture.toolController.selection?.position,
+            EditorTextPosition(line: 3, column: 1)
+        )
+    }
+
+    @MainActor
+    func testTimeAndDateInsertionIsLocalizedUndoableAndRejectsMarkedText() throws {
+        let fixture = try makeHostedEditor(text: "At: ", isEditable: true)
+        defer { destroy(fixture) }
+
+        fixture.textView.selectedRange = NSRange(location: 4, length: 0)
+        let undoManager = try XCTUnwrap(fixture.textView.undoManager)
+        undoManager.removeAllActions()
+        let inserted = try fixture.toolController.insertTimeAndDate(
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            locale: Locale(identifier: "en_US_POSIX"),
+            calendar: Calendar(identifier: .gregorian),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+        render(fixture.controller)
+
+        XCTAssertEqual(fixture.model.text, "At: \(inserted)")
+        XCTAssertTrue(undoManager.canUndo)
+
+        fixture.textView.setMarkedText(
+            "x",
+            selectedRange: NSRange(location: 1, length: 0)
+        )
+        XCTAssertThrowsError(
+            try fixture.toolController.insertTimeAndDate(
+                date: Date(timeIntervalSince1970: 1_700_000_000),
+                locale: Locale(identifier: "en_US_POSIX"),
+                calendar: Calendar(identifier: .gregorian),
+                timeZone: TimeZone(secondsFromGMT: 0)!
+            )
+        ) { error in
+            XCTAssertEqual(error as? PhonePadEditorToolError, .markedTextActive)
+        }
+    }
+
+    @MainActor
     func testNativeFindAndExplicitNavigationUseRealEditorSelection() throws {
         let fixture = try makeHostedEditor(
             text: "alpha beta alpha",
@@ -268,7 +386,7 @@ final class PhonePadTextEditorTests: XCTestCase {
         )
         defer { destroy(fixture) }
 
-        try configureFindSession(
+        _ = try configureFindSession(
             fixture,
             query: "cat",
             replacement: "fox"
@@ -379,11 +497,13 @@ final class PhonePadTextEditorTests: XCTestCase {
         )
         let transitionController = PhonePadEditorTransitionController()
         let findController = PhonePadEditorFindController()
+        let toolController = PhonePadEditorToolController()
         let controller = UIHostingController(
             rootView: EditorHarness(
                 model: model,
                 transitionController: transitionController,
-                findController: findController
+                findController: findController,
+                toolController: toolController
             )
         )
         let window = UIWindow(windowScene: scene)
@@ -403,6 +523,7 @@ final class PhonePadTextEditorTests: XCTestCase {
             controller: controller,
             transitionController: transitionController,
             findController: findController,
+            toolController: toolController,
             window: window,
             textView: textView
         )

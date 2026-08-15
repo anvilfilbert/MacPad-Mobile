@@ -253,7 +253,11 @@ public func activateAuthoritativelyMatchedBoundFileOpen(
         recoveryState: tab.document.recoveryState
     )
     var tabs = state.tabs
-    tabs[index] = PhonePadTab(id: tab.id, document: document)
+    tabs[index] = PhonePadTab(
+        id: tab.id,
+        document: document,
+        displaySettings: tab.displaySettings
+    )
     return PhonePadState(tabs: tabs, activeTabID: tab.id)
 }
 
@@ -289,7 +293,11 @@ public func prepareDetachedDocumentOpen(
         isUnsaved: true,
         recoveryState: .checkpointPending
     )
-    let tab = PhonePadTab(id: tabID, document: document)
+    let tab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     let openedState = installingExternallyOpenedTab(state: state, tab: tab)
     let envelope = try RecoveryEnvelope(
         formatVersion: RecoveryEnvelope.currentFormatVersion,
@@ -350,7 +358,11 @@ public func openExternallyRecoveredDetachedDocument(
         isUnsaved: true,
         recoveryState: .protectedUnsaved
     )
-    let tab = PhonePadTab(id: tabID, document: document)
+    let tab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     return installingExternallyOpenedTab(state: state, tab: tab)
 }
 
@@ -409,7 +421,11 @@ public func openExternallyRecoveredBoundDocument(
         isUnsaved: true,
         recoveryState: .protectedUnsaved
     )
-    let tab = PhonePadTab(id: tabID, document: document)
+    let tab = PhonePadTab(
+        id: tabID,
+        document: document,
+        displaySettings: .initial
+    )
     return installingExternallyOpenedTab(state: state, tab: tab)
 }
 
@@ -579,6 +595,10 @@ private func markingFileOpenConflict(
         recoveryState: tab.document.recoveryState
     )
     var tabs = state.tabs
-    tabs[index] = PhonePadTab(id: tab.id, document: document)
+    tabs[index] = PhonePadTab(
+        id: tab.id,
+        document: document,
+        displaySettings: tab.displaySettings
+    )
     return PhonePadState(tabs: tabs, activeTabID: tab.id)
 }
