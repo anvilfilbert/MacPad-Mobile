@@ -7,6 +7,140 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testExternalOpenHostPublishesRealFileFixtures() throws {
+        let host = launchExternalOpenHost()
+
+        XCTAssertTrue(
+            host.staticTexts["externalopenhost.ready"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(host.staticTexts["externalopenhost.error"].exists)
+
+        let durable = try externalOpenFixture(
+            in: host,
+            urlIdentifier: "externalopenhost.fixture.durable.url",
+            contentIdentifier: "externalopenhost.fixture.durable.content"
+        )
+        let readOnly = try externalOpenFixture(
+            in: host,
+            urlIdentifier: "externalopenhost.fixture.readonly.url",
+            contentIdentifier: "externalopenhost.fixture.readonly.content"
+        )
+        let generic = try externalOpenFixture(
+            in: host,
+            urlIdentifier: "externalopenhost.fixture.generic.url",
+            contentIdentifier: "externalopenhost.fixture.generic.content"
+        )
+
+        XCTAssertEqual(durable.url.pathExtension, "txt")
+        XCTAssertEqual(durable.content, "Durable external open\n")
+        XCTAssertEqual(readOnly.url.pathExtension, "txt")
+        XCTAssertEqual(readOnly.content, "Read-only external open\n")
+        XCTAssertEqual(generic.url.pathExtension, "dat")
+        XCTAssertEqual(generic.content, "Generic data external open\n")
+    }
+
+    @MainActor
+    func testColdExternalOpenCopyRequiredDurableFileRequiresSaveAs() throws {
+        let host = launchExternalOpenHost()
+        let fixture = try externalOpenFixture(
+            in: host,
+            urlIdentifier: "externalopenhost.fixture.durable.url",
+            contentIdentifier: "externalopenhost.fixture.durable.content"
+        )
+
+        let app = openPhonePadCold(with: fixture.url)
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.root"]
+                .waitForExistence(timeout: 5)
+        )
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue(editor, value: fixture.content, timeout: 20))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.external-open.notice"]
+                .firstMatch
+                .waitForExistence(timeout: 20)
+        )
+        let tabs = tabItems(in: app)
+        XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 5))
+        XCTAssertEqual(tabs.firstMatch.label, "durable.txt")
+
+        let actionMenu = app.descendants(matching: .any)["phonepad.action-menu"]
+            .firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 2))
+        actionMenu.tap()
+        let save = app.buttons["phonepad.action-menu.save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 2))
+        save.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.save-as.sheet"]
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
+    }
+
+    @MainActor
+    func testColdExternalOpenReadOnlyFileRequiresSaveAs() throws {
+        let host = launchExternalOpenHost()
+        let fixture = try externalOpenFixture(
+            in: host,
+            urlIdentifier: "externalopenhost.fixture.readonly.url",
+            contentIdentifier: "externalopenhost.fixture.readonly.content"
+        )
+
+        let app = openPhonePadCold(with: fixture.url)
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.root"]
+                .waitForExistence(timeout: 5)
+        )
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue(editor, value: fixture.content, timeout: 10))
+        let tabs = tabItems(in: app)
+        XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 5))
+        XCTAssertEqual(tabs.firstMatch.label, "read-only.txt")
+
+        let actionMenu = app.descendants(matching: .any)["phonepad.action-menu"]
+            .firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 2))
+        actionMenu.tap()
+        let save = app.buttons["phonepad.action-menu.save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 2))
+        save.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.save-as.sheet"]
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
+    }
+
+    @MainActor
+    func testColdExternalOpenAcceptsGenericDataFixture() throws {
+        let host = launchExternalOpenHost()
+        let fixture = try externalOpenFixture(
+            in: host,
+            urlIdentifier: "externalopenhost.fixture.generic.url",
+            contentIdentifier: "externalopenhost.fixture.generic.content"
+        )
+
+        let app = openPhonePadCold(with: fixture.url)
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["phonepad.root"]
+                .waitForExistence(timeout: 5)
+        )
+        let editor = app.textViews["phonepad.editor.text-view"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue(editor, value: fixture.content, timeout: 10))
+        let tabs = tabItems(in: app)
+        XCTAssertTrue(waitForCount(tabs, count: 1, timeout: 5))
+        XCTAssertEqual(tabs.firstMatch.label, "generic.dat")
+    }
+
+    @MainActor
     func testFileConflictUsesStableExplicitResolutionIdentifiers() {
         let app = XCUIApplication()
         app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
@@ -401,6 +535,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         ].firstMatch
         XCTAssertTrue(secondDrag.waitForExistence(timeout: 2))
         XCTAssertTrue(thirdDrag.waitForExistence(timeout: 2))
+        tabStrip.swipeLeft()
         XCTAssertTrue(waitForHittable(secondDrag, timeout: 5))
         XCTAssertTrue(waitForHittable(thirdDrag, timeout: 5))
         XCTAssertTrue(secondDrag.isEnabled)
@@ -591,6 +726,57 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    private func launchExternalOpenHost() -> XCUIApplication {
+        let host = XCUIApplication(
+            bundleIdentifier: "com.anvilfilbert.PhonePad.ExternalOpenHost"
+        )
+        host.launch()
+        return host
+    }
+
+    @MainActor
+    private func externalOpenFixture(
+        in host: XCUIApplication,
+        urlIdentifier: String,
+        contentIdentifier: String
+    ) throws -> ExternalOpenHostFixture {
+        let ready = host.staticTexts["externalopenhost.ready"]
+        guard ready.waitForExistence(timeout: 5) else {
+            let error = host.staticTexts["externalopenhost.error"]
+            throw ExternalOpenHostUITestError.hostNotReady(
+                errorValue: error.value as? String
+            )
+        }
+        let urlElement = host.staticTexts[urlIdentifier]
+        guard urlElement.waitForExistence(timeout: 2),
+              let urlValue = urlElement.value as? String,
+              let url = URL(string: urlValue),
+              url.isFileURL else {
+            throw ExternalOpenHostUITestError.invalidFixtureURL(
+                identifier: urlIdentifier,
+                value: urlElement.value as? String
+            )
+        }
+        let contentElement = host.staticTexts[contentIdentifier]
+        guard contentElement.waitForExistence(timeout: 2),
+              let content = contentElement.value as? String else {
+            throw ExternalOpenHostUITestError.missingFixtureContent(
+                identifier: contentIdentifier
+            )
+        }
+        return ExternalOpenHostFixture(url: url, content: content)
+    }
+
+    @MainActor
+    private func openPhonePadCold(with url: URL) -> XCUIApplication {
+        let app = XCUIApplication(bundleIdentifier: "com.anvilfilbert.PhonePad")
+        app.launchEnvironment["PHONEPAD_UI_TEST_RECOVERY_NAMESPACE"] = UUID().uuidString
+        app.terminate()
+        app.open(url)
+        return app
+    }
+
+    @MainActor
     private func waitForTabOrder(
         _ query: XCUIElementQuery,
         expectedIdentifiers: [String],
@@ -607,4 +793,15 @@ final class PhonePadLaunchUITests: XCTestCase {
         return false
     }
 
+}
+
+private struct ExternalOpenHostFixture {
+    let url: URL
+    let content: String
+}
+
+private enum ExternalOpenHostUITestError: Error {
+    case hostNotReady(errorValue: String?)
+    case invalidFixtureURL(identifier: String, value: String?)
+    case missingFixtureContent(identifier: String)
 }

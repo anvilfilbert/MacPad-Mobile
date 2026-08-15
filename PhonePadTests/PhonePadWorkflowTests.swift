@@ -137,6 +137,54 @@ final class PhonePadWorkflowTests: XCTestCase {
         XCTAssertTrue(verification.isExcludedFromBackup)
     }
 
+    func testProtectRecoveryEnvelopePersistsExactPreparedDetachedEnvelope() async throws {
+        let rootURL = try makeRecoveryRoot()
+        let documentID = DocumentID(
+            rawValue: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000012"
+            )!
+        )
+        let encodedFile = try encodeNewTextFile(text: "Detached input\n")
+        let fileReference = RecoveryFileReference(
+            bookmark: try FileBookmark(data: Data([0x12, 0x34])),
+            identity: FileIdentity(
+                volumeUUID: UUID(
+                    uuidString: "00000000-0000-0000-0000-000000000013"
+                )!,
+                documentIdentifier: 12
+            ),
+            displayName: try ValidatedFileName(validating: "Read Only.txt"),
+            cleanDigest: encodedFile.digest,
+            encoding: encodedFile.encoding,
+            lineEnding: encodedFile.lineEnding
+        )
+        let envelope = try RecoveryEnvelope(
+            formatVersion: RecoveryEnvelope.currentFormatVersion,
+            documentID: documentID,
+            title: "Read Only.txt",
+            text: "Detached input\n",
+            editedAt: Date(timeIntervalSince1970: 1_800_000_100),
+            fileReference: fileReference,
+            pendingSave: nil
+        )
+        let store = FileRecoveryStore(
+            rootURL: rootURL,
+            fileManager: .default
+        )
+
+        try await protectRecoveryEnvelope(
+            envelope: envelope,
+            recoveryStore: store
+        )
+
+        let storedEnvelope = try await store.load(documentID: documentID)
+        XCTAssertEqual(storedEnvelope, envelope)
+        let verification = try await store.verifyCheckpoint(
+            documentID: documentID
+        )
+        XCTAssertTrue(verification.isExcludedFromBackup)
+    }
+
     func testRecoveryCheckpointHasCompleteFileProtectionOnDevice() async throws {
         #if targetEnvironment(simulator)
         throw XCTSkip("Simulator does not report a reliable file-protection resource value.")

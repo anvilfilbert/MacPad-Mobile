@@ -45,6 +45,127 @@ public struct OpenedTextFile: Equatable, Sendable {
     }
 }
 
+public enum FileOpenDetachmentReason: Error, Equatable, Sendable {
+    case copyRequired
+    case notWritable
+    case writabilityNotReported
+    case writabilityInspectionFailed(code: Int)
+    case bookmarkCreationFailed(code: Int)
+    case bookmarkResolutionFailed(code: Int)
+    case bookmarkIsStale
+    case bookmarkVerificationFailed(code: Int)
+    case bookmarkResolvedToDifferentFile
+}
+
+public struct ImportedCopyCleanupToken: Equatable, Hashable, Sendable {
+    let rawValue: UUID
+}
+
+struct ImportedCopyCleanupCandidate: Equatable, Sendable {
+    let childName: ValidatedFileName
+    let deviceID: Int64
+    let inode: UInt64
+    let generation: UInt32
+    let byteCount: Int64
+    let modificationTimeSeconds: Int64
+    let modificationTimeNanoseconds: Int64
+    let statusChangeTimeSeconds: Int64
+    let statusChangeTimeNanoseconds: Int64
+}
+
+public enum ImportedCopyCleanupFailure: Error, Equatable, Sendable {
+    case unknownToken
+    case itemChanged
+    case verificationFailed(code: Int)
+    case fileCoordinationFailed(code: Int)
+    case fileCoordinationAccessorNotInvoked
+    case deletionFailed(code: Int)
+    case journal(ImportedCopyCleanupJournalError)
+}
+
+extension ImportedCopyCleanupFailure: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .unknownToken:
+            return "cleanup capability is unavailable"
+        case .itemChanged:
+            return "supplied File no longer matches its verified cleanup capability"
+        case let .verificationFailed(code):
+            return "supplied File verification failed (system code \(code))"
+        case let .fileCoordinationFailed(code):
+            return "Apple Files cleanup coordination failed (system code \(code))"
+        case .fileCoordinationAccessorNotInvoked:
+            return "Apple Files cleanup coordination did not provide the supplied File"
+        case let .deletionFailed(code):
+            return "supplied File removal failed (system code \(code))"
+        case let .journal(error):
+            return error.localizedDescription
+        }
+    }
+}
+
+public enum ImportedCopyCleanupOutcome: Equatable, Sendable {
+    case removed
+    case alreadyAbsent
+    case residual(ImportedCopyCleanupFailure)
+}
+
+public struct OpenedDetachedTextFile: Equatable, Sendable {
+    public let snapshot: DetachedFileSnapshot
+    public let reason: FileOpenDetachmentReason
+    public let importedCopyCleanupToken: ImportedCopyCleanupToken?
+
+    public init(
+        snapshot: DetachedFileSnapshot,
+        reason: FileOpenDetachmentReason,
+        importedCopyCleanupToken: ImportedCopyCleanupToken?
+    ) {
+        self.snapshot = snapshot
+        self.reason = reason
+        self.importedCopyCleanupToken = importedCopyCleanupToken
+    }
+}
+
+public struct RejectedTextFileOpen: Equatable, Sendable {
+    public let error: FileAccessConnectorError
+    public let importedCopyCleanupToken: ImportedCopyCleanupToken?
+
+    public init(
+        error: FileAccessConnectorError,
+        importedCopyCleanupToken: ImportedCopyCleanupToken?
+    ) {
+        self.error = error
+        self.importedCopyCleanupToken = importedCopyCleanupToken
+    }
+}
+
+public enum OpenTextFileOutcome: Equatable, Sendable {
+    case bound(PresentedTextFileSnapshot)
+    case detached(OpenedDetachedTextFile)
+    case rejected(RejectedTextFileOpen)
+}
+
+public enum ActiveFileOpenLocatorMatch: Equatable, Sendable {
+    case none
+    case missingItem(DocumentID)
+    case requiresAuthoritativeRead([DocumentID])
+    case ambiguous([DocumentID])
+}
+
+enum SelectedFileNodePresence: Equatable, Sendable {
+    case missing
+    case present
+}
+
+public enum ActiveFileOpenLocatorClaim: Equatable, Sendable {
+    case bound(documentID: DocumentID, binding: FileBinding)
+    case ephemeral(documentID: DocumentID, locatorURL: URL)
+    case detached(
+        documentID: DocumentID,
+        reference: FileCollisionReference
+    )
+}
+
 public enum FileSaveOutcome: Equatable, Sendable {
     case bound(FileBinding)
     case verifiedDetached(VerifiedDetachedFile)
@@ -103,6 +224,15 @@ public indirect enum FileAccessConnectorError: Error, Equatable, Sendable {
     case providerConflictVersionCountInvalid(count: Int)
     case collisionClaimBookmarkResolutionFailed(documentID: DocumentID, code: Int)
     case collisionClaimBookmarkIsStale(documentID: DocumentID)
+    case recoveryClaimIsNotRecoveryItem(documentID: DocumentID)
+    case activeLocatorBookmarkResolutionFailed(documentID: DocumentID, code: Int)
+    case activeLocatorBookmarkIsStale(documentID: DocumentID)
+    case importedCopyCleanupJournal(ImportedCopyCleanupJournalError)
+    case importedCopyCleanupJournalCleanupFailed(
+        ImportedCopyCleanupJournalError,
+        ImportedCopyCleanupFailure
+    )
+    case importedCopyCleanupCandidateChanged
     case saveAsTargetCollision(FileCollisionClaim)
     case saveAsPlanRequiresAbsentTarget
     case saveAsPlanRequiresExistingTarget
@@ -201,6 +331,18 @@ extension FileAccessConnectorError: LocalizedError {
             return "File ownership for Document \(documentID.rawValue) could not be resolved (system code \(code)). No File was changed; retry Save As."
         case let .collisionClaimBookmarkIsStale(documentID):
             return "File ownership for Document \(documentID.rawValue) is stale. No File was changed; locate that File before retrying Save As."
+        case let .recoveryClaimIsNotRecoveryItem(documentID):
+            return "Recovery File ownership for Document \(documentID.rawValue) has an unsupported active-Tab claim. Refresh recovery data and try again."
+        case let .activeLocatorBookmarkResolutionFailed(documentID, code):
+            return "Open File location for Document \(documentID.rawValue) could not be resolved (system code \(code)). Locate that File before retrying Open."
+        case let .activeLocatorBookmarkIsStale(documentID):
+            return "Open File location for Document \(documentID.rawValue) is stale. Locate that File before retrying Open."
+        case let .importedCopyCleanupJournal(error):
+            return error.localizedDescription
+        case let .importedCopyCleanupJournalCleanupFailed(journal, cleanup):
+            return "\(journal.localizedDescription) Exact supplied-File cleanup also failed: \(cleanup.localizedDescription)."
+        case .importedCopyCleanupCandidateChanged:
+            return "Supplied File cleanup stopped because the Inbox item changed after External Open was queued. The replacement was not removed."
         case let .saveAsTargetCollision(claim):
             return "Save As target is already owned by Document \(claim.documentID.rawValue). Choose that Document or a different target."
         case .saveAsPlanRequiresAbsentTarget:
@@ -332,6 +474,13 @@ public actor FileAccessConnector {
         FileManager
     ) throws -> URL
     typealias UnresolvedVersionCountReader = @Sendable (URL) -> Int
+    typealias FileWritabilityReader = @Sendable (URL) throws -> Bool?
+    typealias ImportedCopyRemover = @Sendable (URL, FileManager) throws -> Void
+    typealias ImportedCopyCleanupJournalMetadataVerifier = @Sendable (
+        URL,
+        ImportedCopyCleanupJournalItemKind,
+        FileManager
+    ) throws -> Void
 
     private let fileManager: FileManager
     private let bookmarkCreator: BookmarkCreator
@@ -342,9 +491,18 @@ public actor FileAccessConnector {
     private let saveAsStagingCleaner: SaveAsStagingCleaner
     private let saveAsRecoveryAccessorSourceProvider: SaveAsRecoveryAccessorSourceProvider
     private let unresolvedVersionCountReader: UnresolvedVersionCountReader
+    private let fileWritabilityReader: FileWritabilityReader
+    private nonisolated let applicationInboxURL: URL?
+    private let importedCopyCleanupJournalRootURL: URL
+    private let importedCopyRemover: ImportedCopyRemover
+    private let importedCopyCleanupJournalMetadataVerifier:
+        ImportedCopyCleanupJournalMetadataVerifier
     public nonisolated let presentationChangeHints: AsyncStream<DocumentID>
     private let presentationHintRelay: PresentationHintRelay
     private var presentedFiles: [DocumentID: PresentedFile]
+    private var importedCopyCleanupRecords: [
+        ImportedCopyCleanupToken: ImportedCopyCleanupRecord
+    ]
 
     public init(fileManager: FileManager) {
         let presentationChanges = makePresentationChangeStream()
@@ -357,9 +515,17 @@ public actor FileAccessConnector {
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
         self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = readFileWritability
+        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
+        self.importedCopyCleanupJournalRootURL =
+            defaultImportedCopyCleanupJournalRootURL()
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
     }
 
     init(
@@ -376,9 +542,17 @@ public actor FileAccessConnector {
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
         self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = readFileWritability
+        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
+        self.importedCopyCleanupJournalRootURL =
+            defaultImportedCopyCleanupJournalRootURL()
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
     }
 
     init(
@@ -398,9 +572,17 @@ public actor FileAccessConnector {
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
         self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = readFileWritability
+        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
+        self.importedCopyCleanupJournalRootURL =
+            defaultImportedCopyCleanupJournalRootURL()
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
     }
 
     init(
@@ -421,9 +603,17 @@ public actor FileAccessConnector {
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = saveAsRecoveryAccessorSourceProvider
         self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = readFileWritability
+        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
+        self.importedCopyCleanupJournalRootURL =
+            defaultImportedCopyCleanupJournalRootURL()
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
     }
 
     init(
@@ -445,9 +635,17 @@ public actor FileAccessConnector {
         self.saveAsStagingCleaner = cleanSaveAsStaging
         self.saveAsRecoveryAccessorSourceProvider = saveAsRecoveryAccessorSourceProvider
         self.unresolvedVersionCountReader = unresolvedVersionCountReader
+        self.fileWritabilityReader = readFileWritability
+        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
+        self.importedCopyCleanupJournalRootURL =
+            defaultImportedCopyCleanupJournalRootURL()
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
     }
 
     init(
@@ -466,9 +664,89 @@ public actor FileAccessConnector {
         self.saveAsStagingCleaner = saveAsStagingCleaner
         self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
         self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = readFileWritability
+        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
+        self.importedCopyCleanupJournalRootURL =
+            defaultImportedCopyCleanupJournalRootURL()
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
+    }
+
+    init(
+        fileManager: FileManager,
+        bookmarkCreator: @escaping BookmarkCreator,
+        bookmarkResolver: @escaping BookmarkResolver,
+        identityReader: @escaping FileIdentityReader,
+        replacer: @escaping FileReplacer,
+        fileWritabilityReader: @escaping FileWritabilityReader,
+        applicationInboxURL: URL?
+    ) {
+        let presentationChanges = makePresentationChangeStream()
+        self.fileManager = fileManager
+        self.bookmarkCreator = bookmarkCreator
+        self.bookmarkResolver = bookmarkResolver
+        self.identityReader = identityReader
+        self.replacer = replacer
+        self.saveAsStagingWriter = writeSaveAsStagingData
+        self.saveAsStagingCleaner = cleanSaveAsStaging
+        self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = fileWritabilityReader
+        self.applicationInboxURL = applicationInboxURL
+        self.importedCopyCleanupJournalRootURL =
+            injectedImportedCopyCleanupJournalRootURL(
+                applicationInboxURL: applicationInboxURL,
+                fileManager: fileManager
+            )
+        self.importedCopyRemover = removeImportedCopy
+        self.importedCopyCleanupJournalMetadataVerifier =
+            verifyImportedCopyCleanupJournalMetadata
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
+    }
+
+    init(
+        fileManager: FileManager,
+        bookmarkCreator: @escaping BookmarkCreator,
+        bookmarkResolver: @escaping BookmarkResolver,
+        identityReader: @escaping FileIdentityReader,
+        replacer: @escaping FileReplacer,
+        fileWritabilityReader: @escaping FileWritabilityReader,
+        applicationInboxURL: URL,
+        importedCopyCleanupJournalRootURL: URL,
+        importedCopyRemover: @escaping ImportedCopyRemover,
+        importedCopyCleanupJournalMetadataVerifier:
+            @escaping ImportedCopyCleanupJournalMetadataVerifier
+    ) {
+        let presentationChanges = makePresentationChangeStream()
+        self.fileManager = fileManager
+        self.bookmarkCreator = bookmarkCreator
+        self.bookmarkResolver = bookmarkResolver
+        self.identityReader = identityReader
+        self.replacer = replacer
+        self.saveAsStagingWriter = writeSaveAsStagingData
+        self.saveAsStagingCleaner = cleanSaveAsStaging
+        self.saveAsRecoveryAccessorSourceProvider =
+            retainSaveAsRecoveryAccessorSourceURL
+        self.unresolvedVersionCountReader = readUnresolvedVersionCount
+        self.fileWritabilityReader = fileWritabilityReader
+        self.applicationInboxURL = applicationInboxURL
+        self.importedCopyCleanupJournalRootURL =
+            importedCopyCleanupJournalRootURL
+        self.importedCopyRemover = importedCopyRemover
+        self.importedCopyCleanupJournalMetadataVerifier =
+            importedCopyCleanupJournalMetadataVerifier
+        self.presentationChangeHints = presentationChanges.stream
+        self.presentationHintRelay = presentationChanges.relay
+        self.presentedFiles = [:]
+        self.importedCopyCleanupRecords = [:]
     }
 
     deinit {
@@ -920,6 +1198,730 @@ public actor FileAccessConnector {
         }
         shouldRetainPresenter = true
         return snapshot
+    }
+
+    public func openTextFile(
+        at selectedURL: URL,
+        documentID: DocumentID,
+        accessIntent: FileOpenAccessIntent
+    ) throws -> OpenTextFileOutcome {
+        let didStartSecurityScope = selectedURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let cleanupToken: ImportedCopyCleanupToken?
+        switch accessIntent {
+        case .inPlace:
+            cleanupToken = nil
+        case .copyRequired:
+            cleanupToken = try prepareImportedCopyCleanupCapability(
+                at: selectedURL,
+                documentID: documentID
+            )
+        }
+        return try openTextFileWithCleanupCapability(
+            at: selectedURL,
+            documentID: documentID,
+            accessIntent: accessIntent,
+            cleanupToken: cleanupToken
+        )
+    }
+
+    func openTextFile(
+        at selectedURL: URL,
+        documentID: DocumentID,
+        capturedImportedCopyCleanupToken cleanupToken:
+            ImportedCopyCleanupToken
+    ) throws -> OpenTextFileOutcome {
+        let didStartSecurityScope = selectedURL
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        try requireImportedCopyCleanupCapability(
+            token: cleanupToken,
+            selectedURL: selectedURL,
+            documentID: documentID
+        )
+        return try openTextFileWithCleanupCapability(
+            at: selectedURL,
+            documentID: documentID,
+            accessIntent: .copyRequired,
+            cleanupToken: cleanupToken
+        )
+    }
+
+    private func openTextFileWithCleanupCapability(
+        at selectedURL: URL,
+        documentID: DocumentID,
+        accessIntent: FileOpenAccessIntent,
+        cleanupToken: ImportedCopyCleanupToken?
+    ) throws -> OpenTextFileOutcome {
+        let presenter: PresentedFile
+        do {
+            try requireSelectedOpenCandidate(
+                at: selectedURL,
+                fileManager: fileManager
+            )
+            presenter = registerPresenter(
+                documentID: documentID,
+                url: selectedURL
+            )
+        } catch let error as FileAccessConnectorError {
+            return try rejectedTextFileOpen(
+                error: error,
+                cleanupToken: cleanupToken
+            )
+        }
+        var shouldRetainPresenter = false
+        defer {
+            if !shouldRetainPresenter {
+                removePresenter(documentID: documentID)
+            }
+        }
+
+        let fileManagerReference = FileManagerReference(fileManager: fileManager)
+        let bookmarkCreator = bookmarkCreator
+        let bookmarkResolver = bookmarkResolver
+        let identityReader = identityReader
+        let unresolvedVersionCountReader = unresolvedVersionCountReader
+        let fileWritabilityReader = fileWritabilityReader
+        let coordinatedOutcome: TypedPresentedTextFileOutcome
+        do {
+            coordinatedOutcome = try presenter.performSynchronousAccess {
+                try coordinateTypedPresentedTextFileRead(
+                    at: selectedURL,
+                    accessIntent: accessIntent,
+                    presenter: presenter,
+                    fileManager: fileManagerReference.fileManager,
+                    bookmarkCreator: bookmarkCreator,
+                    bookmarkResolver: bookmarkResolver,
+                    identityReader: identityReader,
+                    unresolvedVersionCountReader: unresolvedVersionCountReader,
+                    fileWritabilityReader: fileWritabilityReader
+                )
+            }
+        } catch let error as FileAccessConnectorError {
+            return try rejectedTextFileOpen(
+                error: error,
+                cleanupToken: cleanupToken
+            )
+        }
+        switch coordinatedOutcome {
+        case let .bound(snapshot):
+            presenter.updatePresentedItemURL(
+                snapshot.openedFile.binding.locatorURL
+            )
+            shouldRetainPresenter = true
+            return .bound(snapshot)
+        case let .detached(snapshot, reason):
+            try markImportedCopyAwaitingProtection(token: cleanupToken)
+            return .detached(
+                OpenedDetachedTextFile(
+                    snapshot: snapshot,
+                    reason: reason,
+                    importedCopyCleanupToken: cleanupToken
+                )
+            )
+        case let .rejected(error):
+            return try rejectedTextFileOpen(
+                error: error,
+                cleanupToken: cleanupToken
+            )
+        }
+    }
+
+    private func requireImportedCopyCleanupCapability(
+        token: ImportedCopyCleanupToken,
+        selectedURL: URL,
+        documentID: DocumentID
+    ) throws {
+        if importedCopyCleanupRecords[token] == nil {
+            importedCopyCleanupRecords = try readImportedCopyCleanupRecords(
+                rootURL: importedCopyCleanupJournalRootURL,
+                inboxURL: applicationInboxURL,
+                fileManager: fileManager,
+                metadataVerifier:
+                    importedCopyCleanupJournalMetadataVerifier
+            )
+        }
+        guard let record = importedCopyCleanupRecords[token],
+              record.documentID == documentID,
+              record.url.standardizedFileURL
+                == selectedURL.standardizedFileURL else {
+            throw FileAccessConnectorError
+                .importedCopyCleanupCandidateChanged
+        }
+        guard case .exact = inspectImportedCopyRecord(record) else {
+            throw FileAccessConnectorError
+                .importedCopyCleanupCandidateChanged
+        }
+    }
+
+    public func captureImportedCopyCleanup(
+        at selectedURL: URL,
+        documentID: DocumentID
+    ) throws -> ImportedCopyCleanupToken? {
+        let didStartSecurityScope = selectedURL
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try prepareImportedCopyCleanupCapability(
+            at: selectedURL,
+            documentID: documentID
+        )
+    }
+
+    nonisolated func inspectImportedCopyCleanupCandidate(
+        at selectedURL: URL
+    ) throws(FileAccessConnectorError) -> ImportedCopyCleanupCandidate? {
+        let inspectionFileManager = FileManager()
+        let record = try makeImportedCopyCleanupRecord(
+            url: selectedURL,
+            inboxURL: applicationInboxURL,
+            documentID: DocumentID(rawValue: UUID()),
+            digest: nil,
+            phase: .cleanupAuthorized,
+            fileManager: inspectionFileManager
+        )
+        return record.map(importedCopyCleanupCandidate)
+    }
+
+    func captureImportedCopyCleanup(
+        at selectedURL: URL,
+        documentID: DocumentID,
+        matching candidate: ImportedCopyCleanupCandidate
+    ) throws -> ImportedCopyCleanupToken {
+        let didStartSecurityScope = selectedURL
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        guard let record = try makeImportedCopyCleanupRecord(
+            url: selectedURL,
+            inboxURL: applicationInboxURL,
+            documentID: documentID,
+            digest: nil,
+            phase: .cleanupAuthorized,
+            fileManager: fileManager
+        ), importedCopyCleanupCandidate(record) == candidate else {
+            throw FileAccessConnectorError
+                .importedCopyCleanupCandidateChanged
+        }
+        return try persistImportedCopyCleanupCapability(record: record)
+    }
+
+    private func prepareImportedCopyCleanupCapability(
+        at selectedURL: URL,
+        documentID: DocumentID
+    ) throws -> ImportedCopyCleanupToken? {
+        let record = try makeImportedCopyCleanupRecord(
+            url: selectedURL,
+            inboxURL: applicationInboxURL,
+            documentID: documentID,
+            digest: nil,
+            phase: .cleanupAuthorized,
+            fileManager: fileManager
+        )
+        guard let record else {
+            return nil
+        }
+        return try persistImportedCopyCleanupCapability(record: record)
+    }
+
+    private func persistImportedCopyCleanupCapability(
+        record: ImportedCopyCleanupRecord
+    ) throws -> ImportedCopyCleanupToken {
+        let token = ImportedCopyCleanupToken(rawValue: UUID())
+        do {
+            var records = try readImportedCopyCleanupRecords(
+                rootURL: importedCopyCleanupJournalRootURL,
+                inboxURL: applicationInboxURL,
+                fileManager: fileManager,
+                metadataVerifier:
+                    importedCopyCleanupJournalMetadataVerifier
+            )
+            records[token] = record
+            try persistImportedCopyCleanupRecords(
+                records,
+                rootURL: importedCopyCleanupJournalRootURL,
+                fileManager: fileManager,
+                metadataVerifier:
+                    importedCopyCleanupJournalMetadataVerifier
+            )
+            importedCopyCleanupRecords = records
+            return token
+        } catch let journalError as ImportedCopyCleanupJournalError {
+            let cleanup = cleanupImportedCopyRecord(record)
+            switch cleanup {
+            case .removed, .alreadyAbsent:
+                throw FileAccessConnectorError.importedCopyCleanupJournal(
+                    journalError
+                )
+            case let .residual(failure):
+                throw FileAccessConnectorError
+                    .importedCopyCleanupJournalCleanupFailed(
+                        journalError,
+                        failure
+                    )
+            }
+        }
+    }
+
+    private func rejectedTextFileOpen(
+        error: FileAccessConnectorError,
+        cleanupToken: ImportedCopyCleanupToken?
+    ) throws -> OpenTextFileOutcome {
+        let authorizedError = try authorizeRejectedImportedCopy(
+            token: cleanupToken,
+            rejection: error
+        )
+        return .rejected(
+            RejectedTextFileOpen(
+                error: authorizedError,
+                importedCopyCleanupToken: cleanupToken
+            )
+        )
+    }
+
+    private func authorizeRejectedImportedCopy(
+        token: ImportedCopyCleanupToken?,
+        rejection: FileAccessConnectorError
+    ) throws -> FileAccessConnectorError {
+        guard let token else {
+            return rejection
+        }
+        do {
+            try authorizeImportedCopyCleanup(token: token)
+            return rejection
+        } catch let journalError as ImportedCopyCleanupJournalError {
+            guard let record = importedCopyCleanupRecords[token] else {
+                return FileAccessConnectorError.importedCopyCleanupJournal(
+                    journalError
+                )
+            }
+            let cleanup = cleanupImportedCopyRecord(record)
+            switch cleanup {
+            case .removed, .alreadyAbsent:
+                importedCopyCleanupRecords.removeValue(forKey: token)
+                return FileAccessConnectorError.importedCopyCleanupJournal(
+                    journalError
+                )
+            case let .residual(failure):
+                return FileAccessConnectorError
+                    .importedCopyCleanupJournalCleanupFailed(
+                        journalError,
+                        failure
+                    )
+            }
+        }
+    }
+
+    private func authorizeImportedCopyCleanup(
+        token: ImportedCopyCleanupToken
+    ) throws {
+        if importedCopyCleanupRecords[token] == nil {
+            importedCopyCleanupRecords = try readImportedCopyCleanupRecords(
+                rootURL: importedCopyCleanupJournalRootURL,
+                inboxURL: applicationInboxURL,
+                fileManager: fileManager,
+                metadataVerifier:
+                    importedCopyCleanupJournalMetadataVerifier
+            )
+        }
+        guard let record = importedCopyCleanupRecords[token] else {
+            return
+        }
+        guard record.phase == .awaitingProtection else {
+            return
+        }
+        let authorizedRecord = importedCopyCleanupRecord(
+            record,
+            phase: .cleanupAuthorized
+        )
+        var authorizedRecords = importedCopyCleanupRecords
+        authorizedRecords[token] = authorizedRecord
+        try persistImportedCopyCleanupRecords(
+            authorizedRecords,
+            rootURL: importedCopyCleanupJournalRootURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        importedCopyCleanupRecords = authorizedRecords
+    }
+
+    private func markImportedCopyAwaitingProtection(
+        token: ImportedCopyCleanupToken?
+    ) throws {
+        guard let token else {
+            return
+        }
+        if importedCopyCleanupRecords[token] == nil {
+            importedCopyCleanupRecords = try readImportedCopyCleanupRecords(
+                rootURL: importedCopyCleanupJournalRootURL,
+                inboxURL: applicationInboxURL,
+                fileManager: fileManager,
+                metadataVerifier:
+                    importedCopyCleanupJournalMetadataVerifier
+            )
+        }
+        guard let record = importedCopyCleanupRecords[token] else {
+            throw ImportedCopyCleanupJournalError.invalidEntry
+        }
+        guard record.phase == .cleanupAuthorized else {
+            return
+        }
+        let awaitingRecord = importedCopyCleanupRecord(
+            record,
+            phase: .awaitingProtection
+        )
+        var awaitingRecords = importedCopyCleanupRecords
+        awaitingRecords[token] = awaitingRecord
+        try persistImportedCopyCleanupRecords(
+            awaitingRecords,
+            rootURL: importedCopyCleanupJournalRootURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        importedCopyCleanupRecords = awaitingRecords
+    }
+
+    func reassignImportedCopyCleanup(
+        tokens: [ImportedCopyCleanupToken],
+        documentID: DocumentID
+    ) throws {
+        guard !tokens.isEmpty else {
+            return
+        }
+        importedCopyCleanupRecords = try readImportedCopyCleanupRecords(
+            rootURL: importedCopyCleanupJournalRootURL,
+            inboxURL: applicationInboxURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        var reassignedRecords = importedCopyCleanupRecords
+        for token in tokens {
+            guard let record = reassignedRecords[token] else {
+                throw ImportedCopyCleanupJournalError.invalidEntry
+            }
+            reassignedRecords[token] = importedCopyCleanupRecord(
+                record,
+                documentID: documentID
+            )
+        }
+        try persistImportedCopyCleanupRecords(
+            reassignedRecords,
+            rootURL: importedCopyCleanupJournalRootURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        importedCopyCleanupRecords = reassignedRecords
+    }
+
+    func abandonImportedCopyCleanup(
+        tokens: [ImportedCopyCleanupToken]
+    ) throws {
+        guard !tokens.isEmpty else {
+            return
+        }
+        importedCopyCleanupRecords = try readImportedCopyCleanupRecords(
+            rootURL: importedCopyCleanupJournalRootURL,
+            inboxURL: applicationInboxURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        var remainingRecords = importedCopyCleanupRecords
+        for token in tokens {
+            guard remainingRecords.removeValue(forKey: token) != nil else {
+                throw ImportedCopyCleanupFailure.unknownToken
+            }
+        }
+        try persistImportedCopyCleanupRecords(
+            remainingRecords,
+            rootURL: importedCopyCleanupJournalRootURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        importedCopyCleanupRecords = remainingRecords
+    }
+
+    public func matchActiveOpenLocators(
+        selectedURL: URL,
+        claims: [ActiveFileOpenLocatorClaim]
+    ) throws -> ActiveFileOpenLocatorMatch {
+        let didStartSecurityScope = selectedURL
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let selectedLocator = selectedURL.standardizedFileURL
+        var matchingDocumentIDs: Set<DocumentID> = []
+        var matchingEphemeralDocumentIDs: Set<DocumentID> = []
+        for claim in claims {
+            let documentID: DocumentID
+            let locator: URL
+            switch claim {
+            case let .bound(claimedDocumentID, binding):
+                documentID = claimedDocumentID
+                if binding.locatorURL.standardizedFileURL == selectedLocator {
+                    locator = binding.locatorURL
+                } else {
+                    locator = try resolveActiveOpenLocator(
+                        bookmark: binding.bookmark,
+                        documentID: documentID,
+                        bookmarkResolver: bookmarkResolver
+                    )
+                }
+            case let .ephemeral(claimedDocumentID, locatorURL):
+                documentID = claimedDocumentID
+                locator = locatorURL
+                if locator.standardizedFileURL == selectedLocator {
+                    matchingEphemeralDocumentIDs.insert(documentID)
+                }
+            case let .detached(claimedDocumentID, reference):
+                documentID = claimedDocumentID
+                locator = try resolveActiveOpenLocator(
+                    bookmark: reference.bookmark,
+                    documentID: documentID,
+                    bookmarkResolver: bookmarkResolver
+                )
+            }
+            if locator.standardizedFileURL == selectedLocator {
+                matchingDocumentIDs.insert(documentID)
+            }
+        }
+        let orderedMatches = matchingDocumentIDs.sorted {
+            $0.rawValue.uuidString < $1.rawValue.uuidString
+        }
+        guard !orderedMatches.isEmpty else {
+            return .none
+        }
+        if orderedMatches.count == 1 {
+            switch try inspectSelectedFileNodePresence(
+                at: selectedURL,
+                fileManager: fileManager
+            ) {
+            case .missing:
+                return .missingItem(orderedMatches[0])
+            case .present:
+                return .requiresAuthoritativeRead(orderedMatches)
+            }
+        }
+        let matchesOnlyEphemeralDocuments = matchingDocumentIDs
+            == matchingEphemeralDocumentIDs
+        if matchesOnlyEphemeralDocuments,
+           try inspectSelectedFileNodePresence(
+               at: selectedURL,
+               fileManager: fileManager
+           ) == .present {
+            return .requiresAuthoritativeRead(orderedMatches)
+        }
+        return .ambiguous(orderedMatches)
+    }
+
+    func selectedFileNodePresence(
+        at selectedURL: URL
+    ) throws -> SelectedFileNodePresence {
+        let didStartSecurityScope = selectedURL
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                selectedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try inspectSelectedFileNodePresence(
+            at: selectedURL,
+            fileManager: fileManager
+        )
+    }
+
+    public func matchRecoveryFileClaims(
+        candidate: FileOpenCandidate,
+        claims: [FileCollisionClaim]
+    ) throws -> RecoveryFileOpenCollision {
+        let resolvedClaims = try claims.map { claim in
+            try resolveRecoveryFileClaim(
+                claim,
+                bookmarkResolver: bookmarkResolver
+            )
+        }
+        return PhonePadCore.recoveryFileOpenCollision(
+            candidate: candidate,
+            claims: resolvedClaims
+        )
+    }
+
+    public func cleanupImportedCopy(
+        token: ImportedCopyCleanupToken
+    ) -> ImportedCopyCleanupOutcome {
+        do {
+            if importedCopyCleanupRecords[token] == nil {
+                importedCopyCleanupRecords = try readImportedCopyCleanupRecords(
+                    rootURL: importedCopyCleanupJournalRootURL,
+                    inboxURL: applicationInboxURL,
+                    fileManager: fileManager,
+                    metadataVerifier:
+                        importedCopyCleanupJournalMetadataVerifier
+                )
+            }
+            try authorizeImportedCopyCleanup(token: token)
+        } catch let error as ImportedCopyCleanupJournalError {
+            return .residual(.journal(error))
+        } catch {
+            return .residual(
+                .journal(
+                    .couldNotReadJournal(code: (error as NSError).code)
+                )
+            )
+        }
+        guard let record = importedCopyCleanupRecords[token] else {
+            return .residual(.unknownToken)
+        }
+        let outcome = cleanupImportedCopyRecord(record)
+        switch outcome {
+        case .removed, .alreadyAbsent:
+            var remainingRecords = importedCopyCleanupRecords
+            remainingRecords.removeValue(forKey: token)
+            do {
+                try persistImportedCopyCleanupRecords(
+                    remainingRecords,
+                    rootURL: importedCopyCleanupJournalRootURL,
+                    fileManager: fileManager,
+                    metadataVerifier:
+                        importedCopyCleanupJournalMetadataVerifier
+                )
+                importedCopyCleanupRecords = remainingRecords
+            } catch let error as ImportedCopyCleanupJournalError {
+                return .residual(.journal(error))
+            } catch {
+                return .residual(
+                    .journal(
+                        .couldNotWriteJournal(code: (error as NSError).code)
+                    )
+                )
+            }
+        case .residual:
+            break
+        }
+        return outcome
+    }
+
+    public func reconcileImportedCopyCleanupJournal() throws
+        -> ImportedCopyCleanupReconciliationReport {
+        let records = try readImportedCopyCleanupRecords(
+            rootURL: importedCopyCleanupJournalRootURL,
+            inboxURL: applicationInboxURL,
+            fileManager: fileManager,
+            metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+        )
+        var remainingRecords = records
+        var removed: [ImportedCopyCleanupJournalItem] = []
+        var alreadyAbsent: [ImportedCopyCleanupJournalItem] = []
+        var awaitingProtection: [ImportedCopyCleanupJournalItem] = []
+        var residuals: [ImportedCopyCleanupResidual] = []
+        for token in sortedImportedCopyCleanupTokens(records.keys) {
+            guard let record = records[token] else {
+                throw ImportedCopyCleanupJournalError.invalidEntry
+            }
+            let item = ImportedCopyCleanupJournalItem(
+                token: token,
+                documentID: record.documentID
+            )
+            guard record.phase == .cleanupAuthorized else {
+                switch inspectImportedCopyRecord(record) {
+                case .absent:
+                    alreadyAbsent.append(item)
+                    remainingRecords.removeValue(forKey: token)
+                case .exact, .changed:
+                    awaitingProtection.append(item)
+                case let .failure(failure):
+                    residuals.append(
+                        ImportedCopyCleanupResidual(
+                            item: item,
+                            failure: failure
+                        )
+                    )
+                }
+                continue
+            }
+            switch cleanupImportedCopyRecord(record) {
+            case .removed:
+                removed.append(item)
+                remainingRecords.removeValue(forKey: token)
+            case .alreadyAbsent:
+                alreadyAbsent.append(item)
+                remainingRecords.removeValue(forKey: token)
+            case let .residual(failure):
+                residuals.append(
+                    ImportedCopyCleanupResidual(
+                        item: item,
+                        failure: failure
+                    )
+                )
+            }
+        }
+        if remainingRecords.count != records.count {
+            try persistImportedCopyCleanupRecords(
+                remainingRecords,
+                rootURL: importedCopyCleanupJournalRootURL,
+                fileManager: fileManager,
+                metadataVerifier: importedCopyCleanupJournalMetadataVerifier
+            )
+        }
+        importedCopyCleanupRecords = remainingRecords
+        return ImportedCopyCleanupReconciliationReport(
+            removed: removed,
+            alreadyAbsent: alreadyAbsent,
+            awaitingProtection: awaitingProtection,
+            residuals: residuals
+        )
+    }
+
+    private func cleanupImportedCopyRecord(
+        _ record: ImportedCopyCleanupRecord
+    ) -> ImportedCopyCleanupOutcome {
+        let didStartSecurityScope = record.url
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                record.url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return coordinateImportedCopyCleanup(
+            record: record,
+            fileManager: fileManager,
+            importedCopyRemover: importedCopyRemover
+        )
+    }
+
+    private func inspectImportedCopyRecord(
+        _ record: ImportedCopyCleanupRecord
+    ) -> ImportedCopyVerificationOutcome {
+        let didStartSecurityScope = record.url
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                record.url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return verifyImportedCopy(
+            at: record.url,
+            record: record,
+            fileManager: fileManager
+        )
     }
 
     public func stopPresenting(documentID: DocumentID) {
@@ -1523,6 +2525,15 @@ private struct VerifiedSavedFile: Sendable {
     let identity: FileIdentity?
 }
 
+private enum TypedPresentedTextFileOutcome: Sendable {
+    case bound(PresentedTextFileSnapshot)
+    case detached(
+        DetachedFileSnapshot,
+        FileOpenDetachmentReason
+    )
+    case rejected(FileAccessConnectorError)
+}
+
 private struct BoundFileCoordination: Sendable {
     let targetURL: @Sendable (URL) throws -> URL
     let replace: @Sendable (
@@ -1551,6 +2562,21 @@ private final class OpenFileCoordinationResultBox: @unchecked Sendable {
 
 private final class PresentedOpenCoordinationResultBox: @unchecked Sendable {
     var result: Result<PresentedTextFileSnapshot, FileAccessConnectorError>?
+}
+
+private final class TypedPresentedOpenCoordinationResultBox: @unchecked Sendable {
+    var result: Result<TypedPresentedTextFileOutcome, FileAccessConnectorError>?
+}
+
+private final class ImportedCopyCleanupResultBox: @unchecked Sendable {
+    var outcome: ImportedCopyCleanupOutcome?
+}
+
+private enum ImportedCopyVerificationOutcome: Sendable {
+    case exact
+    case absent
+    case changed
+    case failure(ImportedCopyCleanupFailure)
 }
 
 private final class PresentedFileObservationResultBox: @unchecked Sendable {
@@ -1703,6 +2729,612 @@ private func cleanSaveAsStaging(
         ),
         fileManager: fileManager
     )
+}
+
+private func openTypedCoordinatedTextFile(
+    at url: URL,
+    accessIntent: FileOpenAccessIntent,
+    fileManager: FileManager,
+    bookmarkCreator: FileAccessConnector.BookmarkCreator,
+    bookmarkResolver: FileAccessConnector.BookmarkResolver,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader,
+    fileWritabilityReader: FileAccessConnector.FileWritabilityReader
+) -> Result<TypedPresentedTextFileOutcome, FileAccessConnectorError> {
+    do {
+        try validateSelectedFileForOpen(at: url, fileManager: fileManager)
+        let data = try readSelectedFile(at: url, fileManager: fileManager)
+        let decodedFile: DecodedTextFile
+        do {
+            decodedFile = try decodeSupportedTextFile(data: data)
+        } catch let error as TextFileDecodingError {
+            throw FileAccessConnectorError.textDecodingFailed(error)
+        }
+        let displayName: ValidatedFileName
+        do {
+            displayName = try ValidatedFileName(validating: url.lastPathComponent)
+        } catch {
+            throw FileAccessConnectorError.selectedFileNameInvalid
+        }
+        let identity = try readOpenFileIdentity(
+            at: url,
+            identityReader: identityReader
+        )
+        let providerConflictVersions = try makeProviderConflictVersions(
+            unresolvedCount: unresolvedVersionCountReader(url)
+        )
+        let candidate = FileOpenCandidate(
+            locatorURL: url,
+            identity: identity,
+            digest: decodedFile.digest,
+            providerConflictVersions: providerConflictVersions
+        )
+        if accessIntent == .copyRequired {
+            return .success(
+                .detached(
+                    DetachedFileSnapshot(
+                        candidate: candidate,
+                        displayName: displayName,
+                        text: decodedFile.text,
+                        recoveryFileReference: nil
+                    ),
+                    .copyRequired
+                )
+            )
+        }
+
+        let bookmark: FileBookmark
+        do {
+            bookmark = try FileBookmark(data: bookmarkCreator(url))
+        } catch {
+            return .success(
+                .detached(
+                    DetachedFileSnapshot(
+                        candidate: candidate,
+                        displayName: displayName,
+                        text: decodedFile.text,
+                        recoveryFileReference: nil
+                    ),
+                    .bookmarkCreationFailed(code: (error as NSError).code)
+                )
+            )
+        }
+        let resolvedBookmark: ResolvedFileBookmark
+        do {
+            resolvedBookmark = try bookmarkResolver(bookmark)
+        } catch {
+            return .success(
+                .detached(
+                    DetachedFileSnapshot(
+                        candidate: candidate,
+                        displayName: displayName,
+                        text: decodedFile.text,
+                        recoveryFileReference: nil
+                    ),
+                    .bookmarkResolutionFailed(code: (error as NSError).code)
+                )
+            )
+        }
+        guard !resolvedBookmark.isStale else {
+            return .success(
+                .detached(
+                    DetachedFileSnapshot(
+                        candidate: candidate,
+                        displayName: displayName,
+                        text: decodedFile.text,
+                        recoveryFileReference: nil
+                    ),
+                    .bookmarkIsStale
+                )
+            )
+        }
+        let resolvedSourceMatch = bookmarkResolutionMatchesOpenSource(
+            sourceURL: url,
+            sourceIdentity: identity,
+            resolvedURL: resolvedBookmark.url,
+            identityReader: identityReader
+        )
+        switch resolvedSourceMatch {
+        case let .failure(reason):
+            return .success(
+                .detached(
+                    DetachedFileSnapshot(
+                        candidate: candidate,
+                        displayName: displayName,
+                        text: decodedFile.text,
+                        recoveryFileReference: nil
+                    ),
+                    reason
+                )
+            )
+        case .success(false):
+            return .success(
+                .detached(
+                    DetachedFileSnapshot(
+                        candidate: candidate,
+                        displayName: displayName,
+                        text: decodedFile.text,
+                        recoveryFileReference: nil
+                    ),
+                    .bookmarkResolvedToDifferentFile
+                )
+            )
+        case .success(true):
+            break
+        }
+
+        let binding = FileBinding(
+            locatorURL: resolvedBookmark.url,
+            bookmark: bookmark,
+            identity: identity,
+            displayName: displayName,
+            digest: decodedFile.digest,
+            encoding: decodedFile.encoding,
+            lineEnding: decodedFile.lineEnding
+        )
+        let detachedSnapshot = DetachedFileSnapshot(
+            candidate: candidate,
+            displayName: displayName,
+            text: decodedFile.text,
+            recoveryFileReference: makeRecoveryFileReference(
+                fileBinding: binding
+            )
+        )
+        let isWritable: Bool?
+        do {
+            isWritable = try fileWritabilityReader(resolvedBookmark.url)
+        } catch {
+            return .success(
+                .detached(
+                    detachedSnapshot,
+                    .writabilityInspectionFailed(code: (error as NSError).code)
+                )
+            )
+        }
+        guard let isWritable else {
+            return .success(
+                .detached(
+                    detachedSnapshot,
+                    .writabilityNotReported
+                )
+            )
+        }
+        guard isWritable else {
+            return .success(
+                .detached(
+                    detachedSnapshot,
+                    .notWritable
+                )
+            )
+        }
+        return .success(
+            .bound(
+                PresentedTextFileSnapshot(
+                    openedFile: OpenedTextFile(
+                        text: decodedFile.text,
+                        binding: binding
+                    ),
+                    providerConflictVersions: providerConflictVersions
+                )
+            )
+        )
+    } catch let error as FileAccessConnectorError {
+        return .success(.rejected(error))
+    } catch {
+        return .success(
+            .rejected(
+                .unexpectedFileSystemFailure(code: (error as NSError).code)
+            )
+        )
+    }
+}
+
+private func readOpenFileIdentity(
+    at url: URL,
+    identityReader: FileAccessConnector.FileIdentityReader
+) throws -> FileIdentity? {
+    do {
+        return try identityReader(url)
+    } catch let error as FileAccessConnectorError {
+        throw error
+    } catch {
+        throw FileAccessConnectorError.fileIdentityInspectionFailed(
+            code: (error as NSError).code
+        )
+    }
+}
+
+private func bookmarkResolutionMatchesOpenSource(
+    sourceURL: URL,
+    sourceIdentity: FileIdentity?,
+    resolvedURL: URL,
+    identityReader: FileAccessConnector.FileIdentityReader
+) -> Result<Bool, FileOpenDetachmentReason> {
+    if sourceURL.standardizedFileURL == resolvedURL.standardizedFileURL {
+        return .success(true)
+    }
+    guard let sourceIdentity else {
+        return .success(false)
+    }
+    do {
+        return .success(try identityReader(resolvedURL) == sourceIdentity)
+    } catch {
+        return .failure(
+            .bookmarkVerificationFailed(code: (error as NSError).code)
+        )
+    }
+}
+
+private func coordinateTypedPresentedTextFileRead(
+    at url: URL,
+    accessIntent: FileOpenAccessIntent,
+    presenter: PresentedFile,
+    fileManager: FileManager,
+    bookmarkCreator: FileAccessConnector.BookmarkCreator,
+    bookmarkResolver: FileAccessConnector.BookmarkResolver,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader: FileAccessConnector.UnresolvedVersionCountReader,
+    fileWritabilityReader: FileAccessConnector.FileWritabilityReader
+) throws -> TypedPresentedTextFileOutcome {
+    let resultBox = TypedPresentedOpenCoordinationResultBox()
+    var coordinationError: NSError?
+    let fileCoordinator = NSFileCoordinator(filePresenter: presenter)
+    fileCoordinator.coordinate(
+        readingItemAt: url,
+        options: .withoutChanges,
+        error: &coordinationError
+    ) { coordinatedURL in
+        resultBox.result = openTypedCoordinatedTextFile(
+            at: coordinatedURL,
+            accessIntent: accessIntent,
+            fileManager: fileManager,
+            bookmarkCreator: bookmarkCreator,
+            bookmarkResolver: bookmarkResolver,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader,
+            fileWritabilityReader: fileWritabilityReader
+        )
+    }
+    if let result = resultBox.result {
+        return try result.get()
+    }
+    if let coordinationError {
+        throw FileAccessConnectorError.fileCoordinationFailed(
+            code: coordinationError.code
+        )
+    }
+    throw FileAccessConnectorError.fileCoordinationAccessorNotInvoked
+}
+
+private func readFileWritability(at url: URL) throws -> Bool? {
+    try url.resourceValues(forKeys: [.isWritableKey]).isWritable
+}
+
+private func defaultApplicationInboxURL(fileManager: FileManager) -> URL? {
+    fileManager.urls(
+        for: .documentDirectory,
+        in: .userDomainMask
+    ).first?.appendingPathComponent("Inbox", isDirectory: true)
+}
+
+private func makeImportedCopyCleanupRecord(
+    url: URL,
+    inboxURL: URL?,
+    documentID: DocumentID,
+    digest: FileDigest?,
+    phase: ImportedCopyCleanupAuthorizationPhase,
+    fileManager: FileManager
+) throws(FileAccessConnectorError) -> ImportedCopyCleanupRecord? {
+    guard url.isFileURL, let inboxURL else {
+        return nil
+    }
+    let canonicalInboxURL = inboxURL
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+    let canonicalParentURL = url
+        .deletingLastPathComponent()
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+    guard canonicalParentURL == canonicalInboxURL else {
+        return nil
+    }
+    var status = stat()
+    let result = lstat(
+        fileManager.fileSystemRepresentation(withPath: url.path),
+        &status
+    )
+    guard result == 0 else {
+        if errno == ENOENT {
+            return nil
+        }
+        throw FileAccessConnectorError.fileSystemInspectionFailed(code: errno)
+    }
+    guard existingItemKind(mode: status.st_mode) == .regularFile else {
+        return nil
+    }
+    let childName: ValidatedFileName
+    do {
+        childName = try ValidatedFileName(validating: url.lastPathComponent)
+    } catch {
+        throw FileAccessConnectorError.selectedFileNameInvalid
+    }
+    return ImportedCopyCleanupRecord(
+        documentID: documentID,
+        childName: childName,
+        url: url.standardizedFileURL,
+        inboxURL: canonicalInboxURL,
+        deviceID: status.st_dev,
+        inode: status.st_ino,
+        generation: status.st_gen,
+        byteCount: Int64(status.st_size),
+        modificationTimeSeconds: Int64(status.st_mtimespec.tv_sec),
+        modificationTimeNanoseconds: Int64(status.st_mtimespec.tv_nsec),
+        statusChangeTimeSeconds: Int64(status.st_ctimespec.tv_sec),
+        statusChangeTimeNanoseconds: Int64(status.st_ctimespec.tv_nsec),
+        digest: digest,
+        phase: phase
+    )
+}
+
+private func importedCopyCleanupRecord(
+    _ record: ImportedCopyCleanupRecord,
+    phase: ImportedCopyCleanupAuthorizationPhase
+) -> ImportedCopyCleanupRecord {
+    ImportedCopyCleanupRecord(
+        documentID: record.documentID,
+        childName: record.childName,
+        url: record.url,
+        inboxURL: record.inboxURL,
+        deviceID: record.deviceID,
+        inode: record.inode,
+        generation: record.generation,
+        byteCount: record.byteCount,
+        modificationTimeSeconds: record.modificationTimeSeconds,
+        modificationTimeNanoseconds: record.modificationTimeNanoseconds,
+        statusChangeTimeSeconds: record.statusChangeTimeSeconds,
+        statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds,
+        digest: record.digest,
+        phase: phase
+    )
+}
+
+private func importedCopyCleanupRecord(
+    _ record: ImportedCopyCleanupRecord,
+    documentID: DocumentID
+) -> ImportedCopyCleanupRecord {
+    ImportedCopyCleanupRecord(
+        documentID: documentID,
+        childName: record.childName,
+        url: record.url,
+        inboxURL: record.inboxURL,
+        deviceID: record.deviceID,
+        inode: record.inode,
+        generation: record.generation,
+        byteCount: record.byteCount,
+        modificationTimeSeconds: record.modificationTimeSeconds,
+        modificationTimeNanoseconds: record.modificationTimeNanoseconds,
+        statusChangeTimeSeconds: record.statusChangeTimeSeconds,
+        statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds,
+        digest: record.digest,
+        phase: record.phase
+    )
+}
+
+private func importedCopyCleanupCandidate(
+    _ record: ImportedCopyCleanupRecord
+) -> ImportedCopyCleanupCandidate {
+    ImportedCopyCleanupCandidate(
+        childName: record.childName,
+        deviceID: Int64(record.deviceID),
+        inode: UInt64(record.inode),
+        generation: record.generation,
+        byteCount: record.byteCount,
+        modificationTimeSeconds: record.modificationTimeSeconds,
+        modificationTimeNanoseconds: record.modificationTimeNanoseconds,
+        statusChangeTimeSeconds: record.statusChangeTimeSeconds,
+        statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds
+    )
+}
+
+private func coordinateImportedCopyCleanup(
+    record: ImportedCopyCleanupRecord,
+    fileManager: FileManager,
+    importedCopyRemover: FileAccessConnector.ImportedCopyRemover
+) -> ImportedCopyCleanupOutcome {
+    let resultBox = ImportedCopyCleanupResultBox()
+    var coordinationError: NSError?
+    let fileCoordinator = NSFileCoordinator(filePresenter: nil)
+    fileCoordinator.coordinate(
+        writingItemAt: record.url,
+        options: .forDeleting,
+        error: &coordinationError
+    ) { coordinatedURL in
+        resultBox.outcome = removeVerifiedImportedCopy(
+            at: coordinatedURL,
+            record: record,
+            fileManager: fileManager,
+            importedCopyRemover: importedCopyRemover
+        )
+    }
+    if let outcome = resultBox.outcome {
+        return outcome
+    }
+    if let coordinationError {
+        return .residual(
+            .fileCoordinationFailed(code: coordinationError.code)
+        )
+    }
+    return .residual(.fileCoordinationAccessorNotInvoked)
+}
+
+private func removeVerifiedImportedCopy(
+    at url: URL,
+    record: ImportedCopyCleanupRecord,
+    fileManager: FileManager,
+    importedCopyRemover: FileAccessConnector.ImportedCopyRemover
+) -> ImportedCopyCleanupOutcome {
+    switch verifyImportedCopy(
+        at: url,
+        record: record,
+        fileManager: fileManager
+    ) {
+    case .exact:
+        break
+    case .absent:
+        return .alreadyAbsent
+    case .changed:
+        return .residual(.itemChanged)
+    case let .failure(failure):
+        return .residual(failure)
+    }
+    do {
+        try importedCopyRemover(url, fileManager)
+    } catch let error as NSError {
+        if error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
+            return .alreadyAbsent
+        }
+        return .residual(.deletionFailed(code: error.code))
+    }
+    return .removed
+}
+
+private func verifyImportedCopy(
+    at url: URL,
+    record: ImportedCopyCleanupRecord,
+    fileManager: FileManager
+) -> ImportedCopyVerificationOutcome {
+    let canonicalParentURL = url
+        .deletingLastPathComponent()
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+    guard canonicalParentURL == record.inboxURL else {
+        return .changed
+    }
+    var status = stat()
+    let statusResult = lstat(
+        fileManager.fileSystemRepresentation(withPath: url.path),
+        &status
+    )
+    guard statusResult == 0 else {
+        if errno == ENOENT {
+            return .absent
+        }
+        return .failure(.verificationFailed(code: Int(errno)))
+    }
+    guard existingItemKind(mode: status.st_mode) == .regularFile,
+          status.st_dev == record.deviceID,
+          status.st_ino == record.inode,
+          status.st_gen == record.generation,
+          Int64(status.st_size) == record.byteCount,
+          Int64(status.st_mtimespec.tv_sec)
+              == record.modificationTimeSeconds,
+          Int64(status.st_mtimespec.tv_nsec)
+              == record.modificationTimeNanoseconds,
+          Int64(status.st_ctimespec.tv_sec)
+              == record.statusChangeTimeSeconds,
+          Int64(status.st_ctimespec.tv_nsec)
+              == record.statusChangeTimeNanoseconds else {
+        return .changed
+    }
+    if let expectedDigest = record.digest {
+        let data: Data
+        switch readRegularFile(at: url, fileManager: fileManager) {
+        case let .success(value):
+            data = value
+        case .failure(.missing):
+            return .absent
+        case .failure(.itemIsNotRegularFile),
+             .failure(.tooLarge):
+            return .changed
+        case let .failure(.readFailed(code)):
+            return .failure(.verificationFailed(code: code))
+        }
+        let observedDigest: FileDigest
+        do {
+            observedDigest = try FileDigest(
+                bytes: Data(SHA256.hash(data: data))
+            )
+        } catch {
+            return .failure(.verificationFailed(code: Int(EIO)))
+        }
+        guard observedDigest == expectedDigest else {
+            return .changed
+        }
+    }
+    return .exact
+}
+
+func removeImportedCopy(url: URL, fileManager: FileManager) throws {
+    let result = unlink(
+        fileManager.fileSystemRepresentation(withPath: url.path)
+    )
+    guard result == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
+private func resolveActiveOpenLocator(
+    bookmark: FileBookmark,
+    documentID: DocumentID,
+    bookmarkResolver: FileAccessConnector.BookmarkResolver
+) throws -> URL {
+    let resolvedBookmark: ResolvedFileBookmark
+    do {
+        resolvedBookmark = try bookmarkResolver(bookmark)
+    } catch {
+        throw FileAccessConnectorError.activeLocatorBookmarkResolutionFailed(
+            documentID: documentID,
+            code: (error as NSError).code
+        )
+    }
+    guard !resolvedBookmark.isStale else {
+        throw FileAccessConnectorError.activeLocatorBookmarkIsStale(
+            documentID: documentID
+        )
+    }
+    return resolvedBookmark.url
+}
+
+private func resolveRecoveryFileClaim(
+    _ claim: FileCollisionClaim,
+    bookmarkResolver: FileAccessConnector.BookmarkResolver
+) throws -> ResolvedRecoveryFileClaim {
+    switch claim {
+    case let .activeTab(documentID, _):
+        throw FileAccessConnectorError.recoveryClaimIsNotRecoveryItem(
+            documentID: documentID
+        )
+    case let .recoveryItem(documentID, reference):
+        return ResolvedRecoveryFileClaim(
+            documentID: documentID,
+            kind: .sourceFile,
+            locatorURL: try resolveCollisionClaimURL(
+                bookmark: reference.bookmark,
+                documentID: documentID,
+                bookmarkResolver: bookmarkResolver
+            ),
+            identity: reference.identity
+        )
+    case let .pendingSaveAs(documentID, destination):
+        let directoryURL = try resolveCollisionClaimURL(
+            bookmark: destination.directoryBookmark,
+            documentID: documentID,
+            bookmarkResolver: bookmarkResolver
+        )
+        let targetURL = directoryURL.appendingPathComponent(
+            destination.fileName.value,
+            isDirectory: false
+        )
+        guard isDirectChild(targetURL, of: directoryURL) else {
+            throw FileAccessConnectorError.directChildResolutionFailed
+        }
+        return ResolvedRecoveryFileClaim(
+            documentID: documentID,
+            kind: .pendingSaveAsDestination,
+            locatorURL: targetURL,
+            identity: nil
+        )
+    }
 }
 
 private func openCoordinatedTextFile(
@@ -4053,6 +5685,18 @@ private func inspectNode(
         return .directory
     case .regularFile, .symbolicLink, .special:
         return .existing(kind)
+    }
+}
+
+private func inspectSelectedFileNodePresence(
+    at url: URL,
+    fileManager: FileManager
+) throws -> SelectedFileNodePresence {
+    switch try inspectNode(at: url, fileManager: fileManager) {
+    case .missing:
+        return .missing
+    case .directory, .existing:
+        return .present
     }
 }
 

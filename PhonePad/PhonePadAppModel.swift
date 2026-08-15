@@ -12,6 +12,242 @@ private struct PendingRecoveryCheckpoint {
     let requiresImmediateCheckpoint: Bool
 }
 
+struct PendingExternalOpenRecoveryPrompt: Equatable, Sendable {
+    let recoveryDocumentID: DocumentID
+    let title: String
+}
+
+private struct ExternalOpenDocumentNotice: Equatable, Sendable {
+    let documentID: DocumentID
+    let message: String
+}
+
+private struct ExternalOpenRecoveryProtectionFailure: Equatable, Sendable {
+    let documentID: DocumentID
+    let message: String
+}
+
+private struct ExternalOpenEphemeralClaim: Equatable, Sendable {
+    let candidate: FileOpenCandidate
+}
+
+private enum AuthoritativeEphemeralOpenMatch: Equatable, Sendable {
+    case none
+    case item(DocumentID)
+    case ambiguous([DocumentID])
+}
+
+private enum AuthoritativeActiveOpenMatch: Equatable, Sendable {
+    case none
+    case ephemeral([DocumentID])
+    case durable(DocumentID)
+}
+
+private struct QueuedExternalOpenRequest: Equatable, Sendable {
+    let id: UUID
+    let request: PhonePadExternalOpenRequest
+    let documentID: DocumentID
+    let tabID: TabID
+    let importedCopyCleanupTokens: [ImportedCopyCleanupToken]
+    let importedCopyCleanupCapture: ImportedCopyCleanupCapture
+}
+
+private enum ImportedCopyCleanupCapture: Equatable, Sendable {
+    case notRequired
+    case candidate(ImportedCopyCleanupCandidate)
+    case inspectionFailed(FileAccessConnectorError)
+}
+
+private struct ExternalOpenCleanupPreflightFailure: Equatable, Sendable {
+    let requestID: UUID
+    let message: String
+}
+
+private struct PendingExternalOpenDecision: Equatable, Sendable {
+    let request: QueuedExternalOpenRequest
+    let recoveryMatch: RecoveryFileOpenMatch
+    let importedCopyCleanupTokens: [ImportedCopyCleanupToken]
+}
+
+private enum PreparedExternalOpenPayload: Equatable, Sendable {
+    case bound(
+        prepared: PreparedBoundDocumentOpen,
+        snapshot: PresentedTextFileSnapshot
+    )
+    case detached(
+        prepared: PreparedDetachedDocumentOpen,
+        openedFile: OpenedDetachedTextFile
+    )
+
+    var candidate: FileOpenCandidate {
+        switch self {
+        case let .bound(prepared, _):
+            return prepared.candidate
+        case let .detached(prepared, _):
+            return prepared.candidate
+        }
+    }
+
+    var importedCopyCleanupToken: ImportedCopyCleanupToken? {
+        switch self {
+        case .bound:
+            return nil
+        case let .detached(_, openedFile):
+            return openedFile.importedCopyCleanupToken
+        }
+    }
+
+    var detachmentReason: FileOpenDetachmentReason? {
+        switch self {
+        case .bound:
+            return nil
+        case let .detached(_, openedFile):
+            return openedFile.reason
+        }
+    }
+
+    var provisionalDocumentID: DocumentID {
+        switch self {
+        case let .bound(prepared, _):
+            return prepared.documentID
+        case let .detached(prepared, _):
+            return prepared.documentID
+        }
+    }
+}
+
+private enum ExternalOpenPreparation: Equatable, Sendable {
+    case activateExisting(
+        state: PhonePadState,
+        provisionalDocumentID: DocumentID,
+        candidate: FileOpenCandidate,
+        importedCopyCleanupToken: ImportedCopyCleanupToken?,
+        detachmentReason: FileOpenDetachmentReason?
+    )
+    case prepared(PreparedExternalOpenPayload)
+
+    var candidate: FileOpenCandidate {
+        switch self {
+        case let .activateExisting(_, _, candidate, _, _):
+            return candidate
+        case let .prepared(payload):
+            return payload.candidate
+        }
+    }
+
+    var importedCopyCleanupToken: ImportedCopyCleanupToken? {
+        switch self {
+        case let .activateExisting(_, _, _, cleanupToken, _):
+            return cleanupToken
+        case let .prepared(payload):
+            return payload.importedCopyCleanupToken
+        }
+    }
+
+    var detachmentReason: FileOpenDetachmentReason? {
+        switch self {
+        case let .activateExisting(_, _, _, _, reason):
+            return reason
+        case let .prepared(payload):
+            return payload.detachmentReason
+        }
+    }
+}
+
+private enum ExternalOpenCommitResult: Equatable, Sendable {
+    case complete
+    case recoveryProtectionFailed
+}
+
+private struct PendingImportedCopyCleanup: Equatable, Sendable {
+    let documentID: DocumentID?
+    var tokens: [ImportedCopyCleanupToken]
+}
+
+private func uniqueImportedCopyCleanupTokens(
+    _ tokens: [ImportedCopyCleanupToken]
+) -> [ImportedCopyCleanupToken] {
+    var seen: Set<ImportedCopyCleanupToken> = []
+    return tokens.filter { token in
+        seen.insert(token).inserted
+    }
+}
+
+private func externalOpenCandidate(
+    _ candidate: FileOpenCandidate,
+    matches claim: FileOpenCandidate
+) -> Bool {
+    candidate.locatorURL.standardizedFileURL
+        == claim.locatorURL.standardizedFileURL
+        && candidate.identity == claim.identity
+        && candidate.digest == claim.digest
+        && candidate.providerConflictVersions
+            == claim.providerConflictVersions
+}
+
+private enum PhonePadExternalOpenActionError: Error, LocalizedError {
+    case actionAlreadyInProgress
+    case commitRequestMissing
+    case activeLocatorCollisionAmbiguous([DocumentID])
+    case durableDetachedSourceIdentityChanged(DocumentID)
+    case durableDetachedSourceContentChanged(DocumentID)
+    case durableDetachedSourceHasUnresolvedProviderVersions(
+        documentID: DocumentID,
+        count: Int
+    )
+    case recoveryCollisionAmbiguous([DocumentID])
+    case recoveryItemMissing(DocumentID)
+    case recoveryMatchChanged(DocumentID)
+    case rejectedFileCleanupFailed(
+        rejection: FileAccessConnectorError,
+        cleanup: ImportedCopyCleanupFailure
+    )
+    case cleanupMustFinishBeforeDismissal
+    case cleanupNotRequired
+    case cleanupRequiresRecoveryProtection(DocumentID)
+
+    var errorDescription: String? {
+        switch self {
+        case .actionAlreadyInProgress:
+            return "Another File, recovery, or Tab action is still running. Wait for it to finish and retry External Open."
+        case .commitRequestMissing:
+            return "External Open no longer matches the pending editor commit. Keep the current Document open and retry."
+        case let .activeLocatorCollisionAmbiguous(documentIDs):
+            let identifiers = documentIDs
+                .map { $0.rawValue.uuidString }
+                .joined(separator: ", ")
+            return "Selected File matches multiple open Documents (\(identifiers)). Close duplicate Tabs before retrying Open."
+        case let .durableDetachedSourceIdentityChanged(documentID):
+            return "Selected File identity changed since protected Document \(documentID.rawValue.uuidString) was opened. Existing edits were preserved; use Save As or close that Document before opening this File version."
+        case let .durableDetachedSourceContentChanged(documentID):
+            return "Selected File content changed since this protected Document was opened (Document \(documentID.rawValue.uuidString)). Existing edits were preserved; use Save As or close that Document before opening this File version."
+        case let .durableDetachedSourceHasUnresolvedProviderVersions(
+            documentID,
+            count
+        ):
+            return "Selected File has \(count) unresolved provider version(s) for protected Document \(documentID.rawValue.uuidString). Existing edits were preserved; resolve provider versions before retrying Open."
+        case let .recoveryCollisionAmbiguous(documentIDs):
+            let identifiers = documentIDs
+                .map { $0.rawValue.uuidString }
+                .joined(separator: ", ")
+            return "External File matches multiple preserved Documents (\(identifiers)). Resolve those recovery items before retrying Open."
+        case let .recoveryItemMissing(documentID):
+            return "Preserved work for Document \(documentID.rawValue.uuidString) is no longer available. Refresh recovery data and retry External Open."
+        case let .recoveryMatchChanged(documentID):
+            return "External File no longer matches preserved Document \(documentID.rawValue.uuidString). Review the File and retry the Open decision."
+        case let .rejectedFileCleanupFailed(rejection, cleanup):
+            return rejection.localizedDescription + " "
+                + importedCopyCleanupFailureMessage(cleanup)
+        case .cleanupMustFinishBeforeDismissal:
+            return "Imported File cleanup must finish before External Open can be dismissed. Retry Cleanup."
+        case .cleanupNotRequired:
+            return "No imported File copy cleanup is waiting. Open another supplied File to continue."
+        case let .cleanupRequiresRecoveryProtection(documentID):
+            return "Imported File copy cleanup for Document \(documentID.rawValue.uuidString) is deferred until its recovery checkpoint is protected. Retry Recovery before retrying cleanup."
+        }
+    }
+}
+
 private enum RecoveryCheckpointPersistenceOutcome: Equatable {
     case persisted
     case superseded
@@ -69,6 +305,7 @@ private struct PendingTabCloseCleanup {
 private enum PhonePadRecoveryActionError: Error, LocalizedError {
     case actionAlreadyInProgress
     case checkpointHeldForFileConflictReload
+    case recoveryDocumentAlreadyOpen(DocumentID)
     case recoveryItemCannotBeRecovered
     case recoveryItemMissing
 
@@ -78,6 +315,8 @@ private enum PhonePadRecoveryActionError: Error, LocalizedError {
             "Another recovery action is still running. Wait for it to finish and retry."
         case .checkpointHeldForFileConflictReload:
             "Current edits remain locked until Reload Current finishes. Retry Reload Current or retry recovery before editing."
+        case let .recoveryDocumentAlreadyOpen(documentID):
+            "Document \(documentID.rawValue.uuidString) is already open. Use its existing Tab instead of changing its protected recovery item."
         case .recoveryItemCannotBeRecovered:
             "This preserved work is corrupt or unsupported. Keep it for a compatible PhonePad version, or choose Discard Recovery."
         case .recoveryItemMissing:
@@ -183,6 +422,15 @@ final class PhonePadAppModel: ObservableObject {
     @Published private(set) var pendingTabClosePrompt: PendingTabClosePrompt?
     @Published private(set) var tabCloseError: String?
     @Published private(set) var tabCloseCleanupRequired: Bool
+    @Published private(set) var externalOpenCommitRequestID: UUID?
+    @Published private(set) var externalOpenInProgress: Bool
+    @Published private(set) var pendingExternalOpenRecoveryPrompt: PendingExternalOpenRecoveryPrompt?
+    @Published private(set) var externalOpenError: String?
+    @Published private(set) var externalOpenCleanupRequired: Bool
+    @Published private var externalOpenGeneralNotice: String?
+    @Published private var externalOpenDocumentNotice:
+        ExternalOpenDocumentNotice?
+    @Published private var importedCopyCleanupJournalNotice: String?
 
     private let recoveryStore: any RecoveryStoring
     private let fileAccessConnector: FileAccessConnector
@@ -202,6 +450,23 @@ final class PhonePadAppModel: ObservableObject {
     private var pendingTabCloseSession: PendingTabCloseSession?
     private var pendingTabCloseCleanup: PendingTabCloseCleanup?
     private var pendingTabCloseBoundSaveDocumentID: DocumentID?
+    private var externalOpenQueue: [QueuedExternalOpenRequest]
+    private var externalOpenCleanupPreflightBatchIDs: Set<UUID>
+    private var externalOpenCleanupPreflightFailures: [
+        UUID: ExternalOpenCleanupPreflightFailure
+    ]
+    private var pendingExternalOpenDecision: PendingExternalOpenDecision?
+    private var pendingExternalOpenCleanups: [PendingImportedCopyCleanup]
+    private var externalOpenCleanupInProgress: Bool
+    private var externalOpenEphemeralClaims: [
+        DocumentID: [ExternalOpenEphemeralClaim]
+    ]
+    private var terminalExternalOpenErrorPendingDismissal: Bool
+    private var didReconcileImportedCopyCleanupJournalOnActivation: Bool
+    private var importedCopyCleanupJournalRetryRequired: Bool
+    private var importedCopyCleanupJournalErrorMessage: String?
+    private var externalOpenRecoveryProtectionFailure:
+        ExternalOpenRecoveryProtectionFailure?
 
     init(
         state: PhonePadState,
@@ -234,6 +499,14 @@ final class PhonePadAppModel: ObservableObject {
         pendingTabClosePrompt = nil
         tabCloseError = nil
         tabCloseCleanupRequired = false
+        externalOpenCommitRequestID = nil
+        externalOpenInProgress = false
+        pendingExternalOpenRecoveryPrompt = nil
+        externalOpenError = nil
+        externalOpenCleanupRequired = false
+        externalOpenGeneralNotice = nil
+        externalOpenDocumentNotice = nil
+        importedCopyCleanupJournalNotice = nil
         pendingCheckpoint = nil
         failedCheckpoint = nil
         pendingFileSaveCleanup = nil
@@ -246,7 +519,47 @@ final class PhonePadAppModel: ObservableObject {
         pendingTabCloseSession = nil
         pendingTabCloseCleanup = nil
         pendingTabCloseBoundSaveDocumentID = nil
+        externalOpenQueue = []
+        externalOpenCleanupPreflightBatchIDs = []
+        externalOpenCleanupPreflightFailures = [:]
+        pendingExternalOpenDecision = nil
+        pendingExternalOpenCleanups = []
+        externalOpenCleanupInProgress = false
+        externalOpenEphemeralClaims = [:]
+        terminalExternalOpenErrorPendingDismissal = false
+        didReconcileImportedCopyCleanupJournalOnActivation = true
+        importedCopyCleanupJournalRetryRequired = false
+        importedCopyCleanupJournalErrorMessage = nil
+        externalOpenRecoveryProtectionFailure = nil
         startPresentationHintTask()
+    }
+
+    var externalOpenNotice: String? {
+        var messages: [String] = []
+        if let externalOpenGeneralNotice {
+            messages.append(externalOpenGeneralNotice)
+        }
+        if let importedCopyCleanupJournalNotice {
+            messages.append(importedCopyCleanupJournalNotice)
+        }
+        if let notice = externalOpenDocumentNotice,
+           let document = state.tabs.first(where: { tab in
+               tab.document.id == notice.documentID
+           })?.document,
+           state.activeTab.document.id == notice.documentID,
+           document.fileBinding == nil,
+           document.isUnsaved,
+           document.recoveryState == .protectedUnsaved {
+            messages.append(notice.message)
+        }
+        guard !messages.isEmpty else {
+            return nil
+        }
+        return messages.joined(separator: " ")
+    }
+
+    var externalOpenErrorRequiresDismissal: Bool {
+        terminalExternalOpenErrorPendingDismissal
     }
 
     deinit {
@@ -317,6 +630,8 @@ final class PhonePadAppModel: ObservableObject {
             || fileSaveCleanupRequired
             || pendingTabCloseSession != nil
             || tabTransitionInProgress
+            || !externalOpenQueue.isEmpty
+            || pendingExternalOpenDecision != nil
     }
 
     var editorInteractionDisabled: Bool {
@@ -324,6 +639,7 @@ final class PhonePadAppModel: ObservableObject {
             || pendingSaveAsReplacement != nil
             || activeRecoveryAction != nil
             || activeDocumentTransitionInProgress
+            || externalOpenInProgress
     }
 
     var editorMutationDisabled: Bool {
@@ -331,6 +647,7 @@ final class PhonePadAppModel: ObservableObject {
             || fileSaveCleanupRequired
             || pendingTabCloseSession != nil
             || failedCheckpoint != nil
+            || pendingExternalOpenDecision != nil
     }
 
     private var pendingTabCloseCandidateTabID: TabID? {
@@ -408,6 +725,13 @@ final class PhonePadAppModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private var externalOpenTransitionOwnsWorkspace: Bool {
+        !externalOpenQueue.isEmpty
+            || externalOpenCommitRequestID != nil
+            || externalOpenInProgress
+            || pendingExternalOpenDecision != nil
     }
 
     func clearTabTransitionFeedback() {
@@ -851,6 +1175,2068 @@ final class PhonePadAppModel: ObservableObject {
         }
     }
 
+    func enqueueExternalOpenRequests(
+        _ requests: [PhonePadExternalOpenRequest]
+    ) async {
+        let queuedRequests = requests.map { request in
+            QueuedExternalOpenRequest(
+                id: UUID(),
+                request: request,
+                documentID: DocumentID(rawValue: UUID()),
+                tabID: TabID(rawValue: UUID()),
+                importedCopyCleanupTokens: [],
+                importedCopyCleanupCapture:
+                    importedCopyCleanupCapture(request: request)
+            )
+        }
+        externalOpenQueue.append(contentsOf: queuedRequests)
+        await preflightQueuedExternalOpenCleanup(
+            requestIDs: queuedRequests.map(\.id)
+        )
+    }
+
+    private func importedCopyCleanupCapture(
+        request: PhonePadExternalOpenRequest
+    ) -> ImportedCopyCleanupCapture {
+        guard request.accessIntent == .copyRequired else {
+            return .notRequired
+        }
+        do {
+            guard let candidate = try fileAccessConnector
+                .inspectImportedCopyCleanupCandidate(at: request.url) else {
+                return .notRequired
+            }
+            return .candidate(candidate)
+        } catch {
+            return .inspectionFailed(error)
+        }
+    }
+
+    private func preflightQueuedExternalOpenCleanup(
+        requestIDs: [UUID]
+    ) async {
+        let batchID = UUID()
+        externalOpenCleanupPreflightBatchIDs.insert(batchID)
+
+        for requestID in requestIDs {
+            do {
+                _ = try await captureQueuedImportedCopyCleanup(
+                    requestID: requestID
+                )
+                externalOpenCleanupPreflightFailures.removeValue(
+                    forKey: requestID
+                )
+            } catch {
+                let failure = ExternalOpenCleanupPreflightFailure(
+                    requestID: requestID,
+                    message: error.localizedDescription
+                )
+                externalOpenCleanupPreflightFailures[requestID] = failure
+            }
+        }
+        await finishExternalOpenCleanupPreflight(batchID: batchID)
+    }
+
+    private func finishExternalOpenCleanupPreflight(batchID: UUID) async {
+        externalOpenCleanupPreflightBatchIDs.remove(batchID)
+        guard !externalOpenCleanupPreflightInProgress else {
+            return
+        }
+        await resumePendingActivationWorkAfterExclusiveAction()
+    }
+
+    private var externalOpenCleanupPreflightInProgress: Bool {
+        !externalOpenCleanupPreflightBatchIDs.isEmpty
+    }
+
+    private var liveExternalOpenCleanupTokens:
+        Set<ImportedCopyCleanupToken> {
+        Set(
+            externalOpenQueue.flatMap(\.importedCopyCleanupTokens)
+                + (pendingExternalOpenDecision?
+                    .importedCopyCleanupTokens ?? [])
+        )
+    }
+
+    private var externalOpenQueueRequiresCleanupPreflight: Bool {
+        externalOpenQueue.contains { request in
+            importedCopyCleanupPreflightRequired(request: request)
+        }
+    }
+
+    private func importedCopyCleanupPreflightRequired(
+        request: QueuedExternalOpenRequest
+    ) -> Bool {
+        switch request.importedCopyCleanupCapture {
+        case .notRequired:
+            return false
+        case .inspectionFailed:
+            return true
+        case .candidate:
+            return request.importedCopyCleanupTokens.isEmpty
+        }
+    }
+
+    private func captureQueuedImportedCopyCleanup(
+        requestID: UUID
+    ) async throws -> QueuedExternalOpenRequest {
+        guard let requestIndex = externalOpenQueue.firstIndex(where: {
+            $0.id == requestID
+        }) else {
+            throw PhonePadExternalOpenActionError.commitRequestMissing
+        }
+        var request = externalOpenQueue[requestIndex]
+        guard request.importedCopyCleanupTokens.isEmpty else {
+            return request
+        }
+
+        let capture: ImportedCopyCleanupCapture
+        switch request.importedCopyCleanupCapture {
+        case .notRequired, .candidate:
+            capture = request.importedCopyCleanupCapture
+        case .inspectionFailed:
+            capture = importedCopyCleanupCapture(request: request.request)
+            request = QueuedExternalOpenRequest(
+                id: request.id,
+                request: request.request,
+                documentID: request.documentID,
+                tabID: request.tabID,
+                importedCopyCleanupTokens: request.importedCopyCleanupTokens,
+                importedCopyCleanupCapture: capture
+            )
+            externalOpenQueue[requestIndex] = request
+        }
+
+        switch capture {
+        case .notRequired:
+            return request
+        case let .inspectionFailed(error):
+            throw error
+        case let .candidate(candidate):
+            let token = try await fileAccessConnector
+                .captureImportedCopyCleanup(
+                    at: request.request.url,
+                    documentID: request.documentID,
+                    matching: candidate
+                )
+            retainImportedCopyCleanupTokenForRetry(
+                token,
+                requestID: request.id
+            )
+            guard let capturedRequest = externalOpenQueue.first(where: {
+                $0.id == request.id
+            }) else {
+                throw PhonePadExternalOpenActionError.commitRequestMissing
+            }
+            return capturedRequest
+        }
+    }
+
+    private func prepareQueuedImportedCopyCleanup(
+        requestID: UUID
+    ) async throws -> QueuedExternalOpenRequest {
+        guard externalOpenQueue.first?.id == requestID else {
+            throw PhonePadExternalOpenActionError.commitRequestMissing
+        }
+        return try await captureQueuedImportedCopyCleanup(
+            requestID: requestID
+        )
+    }
+
+    func reportExternalOpenCommitFailure(
+        commitRequestID: UUID,
+        error: Error
+    ) {
+        guard externalOpenCommitRequestID == commitRequestID else {
+            return
+        }
+        externalOpenCommitRequestID = nil
+        externalOpenError = error.localizedDescription
+    }
+
+    func retryExternalOpenCommit() async {
+        guard !terminalExternalOpenErrorPendingDismissal,
+              !externalOpenCleanupPreflightInProgress else {
+            return
+        }
+        terminalExternalOpenErrorPendingDismissal = false
+        externalOpenError = nil
+        await preflightQueuedExternalOpenCleanup(
+            requestIDs: externalOpenQueue.filter {
+                importedCopyCleanupPreflightRequired(request: $0)
+            }.map(\.id)
+        )
+    }
+
+    func dismissTerminalExternalOpenError() {
+        guard terminalExternalOpenErrorPendingDismissal,
+              !externalOpenCleanupRequired else {
+            return
+        }
+        terminalExternalOpenErrorPendingDismissal = false
+        externalOpenError = nil
+        requestExternalOpenEditorCommitIfPossible()
+    }
+
+    @discardableResult
+    func processNextExternalOpen(
+        after committedDocument: CommittedEditorDocument,
+        commitRequestID: UUID
+    ) async -> Bool {
+        guard presentersShouldBeActive else {
+            if externalOpenCommitRequestID == commitRequestID {
+                externalOpenCommitRequestID = nil
+            }
+            return false
+        }
+        guard externalOpenCommitRequestID == commitRequestID,
+              let queuedRequest = externalOpenQueue.first else {
+            externalOpenError = PhonePadExternalOpenActionError
+                .commitRequestMissing
+                .localizedDescription
+            return false
+        }
+        guard canBeginExternalOpenAction else {
+            externalOpenCommitRequestID = nil
+            externalOpenError = PhonePadExternalOpenActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+
+        externalOpenInProgress = true
+        if externalOpenError != importedCopyCleanupJournalErrorMessage {
+            externalOpenError = nil
+        }
+        if !externalOpenCleanupRequired {
+            externalOpenGeneralNotice = nil
+        }
+        terminalExternalOpenErrorPendingDismissal = false
+
+        let opened: Bool
+        do {
+            try validateCommittedDocument(committedDocument)
+            let request = try await prepareQueuedImportedCopyCleanup(
+                requestID: queuedRequest.id
+            )
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
+            opened = try await prepareAndResolveExternalOpen(request: request)
+        } catch {
+            externalOpenError = error.localizedDescription
+            opened = false
+        }
+        await finishExternalOpenAction()
+        return opened
+    }
+
+    func cancelPendingExternalOpen() async {
+        guard !externalOpenCleanupRequired else {
+            externalOpenError = PhonePadExternalOpenActionError
+                .cleanupMustFinishBeforeDismissal
+                .localizedDescription
+            return
+        }
+        guard !externalOpenInProgress,
+              !externalOpenCleanupPreflightInProgress,
+              externalOpenCommitRequestID == nil,
+              !tabTransitionInProgress,
+              !fileSaveInProgress,
+              !fileSaveCleanupRequired,
+              pendingSaveAsReplacement == nil,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil else {
+            externalOpenError = PhonePadExternalOpenActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
+        externalOpenInProgress = true
+
+        if terminalExternalOpenErrorPendingDismissal {
+            terminalExternalOpenErrorPendingDismissal = false
+            externalOpenError = nil
+        } else if let decision = pendingExternalOpenDecision {
+            do {
+                if try queuedImportedCopyCleanupCandidateChanged(
+                    request: decision.request
+                ) {
+                    try await fileAccessConnector
+                        .abandonImportedCopyCleanup(
+                            tokens: decision.importedCopyCleanupTokens
+                        )
+                    pendingExternalOpenDecision = nil
+                    pendingExternalOpenRecoveryPrompt = nil
+                    completeExternalOpenRequest(
+                        requestID: decision.request.id
+                    )
+                    terminalExternalOpenErrorPendingDismissal = true
+                    externalOpenError = FileAccessConnectorError
+                        .importedCopyCleanupCandidateChanged
+                        .localizedDescription
+                } else {
+                    retainImportedCopyCleanup(
+                        documentID: nil,
+                        tokens: decision.importedCopyCleanupTokens
+                    )
+                    pendingExternalOpenDecision = nil
+                    pendingExternalOpenRecoveryPrompt = nil
+                    completeExternalOpenRequest(
+                        requestID: decision.request.id
+                    )
+                    await retryExternalOpenCleanupIfNeeded()
+                    externalOpenError = nil
+                }
+            } catch {
+                externalOpenError = error.localizedDescription
+            }
+        } else if let request = externalOpenQueue.first {
+            do {
+                let capturedRequest = try await
+                    prepareQueuedImportedCopyCleanup(requestID: request.id)
+                if try queuedImportedCopyCleanupCandidateChanged(
+                    request: capturedRequest
+                ) {
+                    try await fileAccessConnector
+                        .abandonImportedCopyCleanup(
+                            tokens: capturedRequest
+                                .importedCopyCleanupTokens
+                        )
+                    completeExternalOpenRequest(requestID: capturedRequest.id)
+                    terminalExternalOpenErrorPendingDismissal = true
+                    externalOpenError = FileAccessConnectorError
+                        .importedCopyCleanupCandidateChanged
+                        .localizedDescription
+                } else {
+                    retainImportedCopyCleanup(
+                        documentID: nil,
+                        tokens: capturedRequest.importedCopyCleanupTokens
+                    )
+                    completeExternalOpenRequest(requestID: capturedRequest.id)
+                    await retryExternalOpenCleanupIfNeeded()
+                    externalOpenError = nil
+                }
+            } catch FileAccessConnectorError
+                .importedCopyCleanupCandidateChanged {
+                completeExternalOpenRequest(requestID: request.id)
+                terminalExternalOpenErrorPendingDismissal = true
+                externalOpenError = FileAccessConnectorError
+                    .importedCopyCleanupCandidateChanged
+                    .localizedDescription
+            } catch {
+                externalOpenError = error.localizedDescription
+            }
+        } else {
+            externalOpenError = nil
+        }
+        await finishExternalOpenAction()
+    }
+
+    private func queuedImportedCopyCleanupCandidateChanged(
+        request: QueuedExternalOpenRequest
+    ) throws -> Bool {
+        guard case let .candidate(candidate) =
+                request.importedCopyCleanupCapture else {
+            return false
+        }
+        let currentCandidate = try fileAccessConnector
+            .inspectImportedCopyCleanupCandidate(at: request.request.url)
+        return currentCandidate != candidate
+    }
+
+    @discardableResult
+    func retryExternalOpenCleanup() async -> Bool {
+        guard externalOpenCommitRequestID == nil,
+              !externalOpenInProgress,
+              pendingExternalOpenDecision == nil,
+              !externalOpenCleanupInProgress else {
+            externalOpenError = PhonePadExternalOpenActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard externalOpenCleanupRequired else {
+            if let documentID = deferredImportedCopyCleanupDocumentID {
+                let message = PhonePadExternalOpenActionError
+                    .cleanupRequiresRecoveryProtection(documentID)
+                    .localizedDescription
+                externalOpenRecoveryProtectionFailure =
+                    ExternalOpenRecoveryProtectionFailure(
+                        documentID: documentID,
+                        message: message
+                    )
+                externalOpenError = message
+            } else {
+                externalOpenError = PhonePadExternalOpenActionError
+                    .cleanupNotRequired
+                    .localizedDescription
+            }
+            return false
+        }
+        externalOpenCleanupInProgress = true
+        defer { externalOpenCleanupInProgress = false }
+        if importedCopyCleanupJournalRetryRequired {
+            return await reconcileImportedCopyCleanupJournal()
+        }
+        return await retryExternalOpenCleanupIfNeeded()
+    }
+
+    @discardableResult
+    func recoverPendingExternalOpen() async -> Bool {
+        guard let decision = beginPendingExternalOpenDecisionAction() else {
+            return false
+        }
+
+        let expectedState = state
+        var preparation: ExternalOpenPreparation?
+        let recovered: Bool
+        do {
+            let refreshedPreparation = try await readAndPrepareExternalOpen(
+                request: decision.request.request,
+                requestID: decision.request.id,
+                documentID: decision.recoveryMatch.documentID,
+                tabID: decision.request.tabID,
+                capturedImportedCopyCleanupToken: decision
+                    .importedCopyCleanupTokens.first
+            )
+            preparation = refreshedPreparation
+            let refreshedMatch = try await revalidatedExternalOpenMatch(
+                candidate: refreshedPreparation.candidate,
+                decision: decision
+            )
+            guard state == expectedState else {
+                throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                    decision.recoveryMatch.documentID
+                )
+            }
+            guard let envelope = try await recoveryStore.load(
+                documentID: refreshedMatch.documentID
+            ) else {
+                throw PhonePadExternalOpenActionError.recoveryItemMissing(
+                    refreshedMatch.documentID
+                )
+            }
+            guard state == expectedState else {
+                throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                    decision.recoveryMatch.documentID
+                )
+            }
+
+            let cleanupTokens = uniqueImportedCopyCleanupTokens(
+                decision.importedCopyCleanupTokens
+                    + [refreshedPreparation.importedCopyCleanupToken]
+                        .compactMap { $0 }
+            )
+            switch refreshedPreparation {
+            case let .activateExisting(
+                _,
+                provisionalDocumentID,
+                _,
+                _,
+                _
+            ):
+                await fileAccessConnector.stopPresenting(
+                    documentID: provisionalDocumentID
+                )
+                state = try openExternallyRecoveredDetachedDocument(
+                    state: state,
+                    envelope: envelope,
+                    tabID: decision.request.tabID
+                )
+            case let .prepared(payload):
+                try await applyRecoveredExternalOpen(
+                    payload: payload,
+                    match: refreshedMatch,
+                    envelope: envelope,
+                    tabID: decision.request.tabID
+                )
+            }
+            retainExternalOpenEphemeralClaimIfNeeded(
+                documentID: state.activeTab.document.id,
+                candidate: refreshedPreparation.candidate
+            )
+            retainImportedCopyCleanup(
+                documentID: decision.recoveryMatch.documentID,
+                tokens: cleanupTokens
+            )
+            recoveryItems.removeAll {
+                $0.documentID == decision.recoveryMatch.documentID
+            }
+            pendingExternalOpenDecision = nil
+            pendingExternalOpenRecoveryPrompt = nil
+            completeExternalOpenRequest(requestID: decision.request.id)
+            _ = await retryExternalOpenCleanupIfNeeded()
+            retainExternalOpenDetachmentNoticeIfNeeded(
+                reason: refreshedPreparation.detachmentReason
+            )
+            externalOpenError = nil
+            presentActiveFileConflictIfNeeded()
+            recovered = true
+        } catch {
+            if let preparation {
+                await retainExternalOpenPreparationForRetry(
+                    preparation,
+                    requestID: decision.request.id
+                )
+            }
+            externalOpenError = error.localizedDescription
+            recovered = false
+        }
+        await finishExternalOpenAction()
+        return recovered
+    }
+
+    @discardableResult
+    func discardRecoveryAndOpenPendingExternalOpen() async -> Bool {
+        guard let decision = beginPendingExternalOpenDecisionAction() else {
+            return false
+        }
+
+        let expectedState = state
+        var preparation: ExternalOpenPreparation?
+        let opened: Bool
+        do {
+            let refreshedDocumentID = decision
+                .importedCopyCleanupTokens.isEmpty
+                ? decision.request.documentID
+                : decision.recoveryMatch.documentID
+            let refreshedPreparation = try await readAndPrepareExternalOpen(
+                request: decision.request.request,
+                requestID: decision.request.id,
+                documentID: refreshedDocumentID,
+                tabID: decision.request.tabID,
+                capturedImportedCopyCleanupToken: decision
+                    .importedCopyCleanupTokens.first
+            )
+            preparation = refreshedPreparation
+            _ = try await revalidatedExternalOpenMatch(
+                candidate: refreshedPreparation.candidate,
+                decision: decision
+            )
+            let cleanupTokens = uniqueImportedCopyCleanupTokens(
+                decision.importedCopyCleanupTokens
+                    + [refreshedPreparation.importedCopyCleanupToken]
+                        .compactMap { $0 }
+            )
+            let recoveryNotice: DiscardedRecoveryDocumentOpenNotice?
+            let commitResult: ExternalOpenCommitResult
+            var decisionCleanupDocumentID: DocumentID? = nil
+            switch refreshedPreparation {
+            case let .activateExisting(
+                activatedState,
+                provisionalDocumentID,
+                _,
+                _,
+                _
+            ):
+                decisionCleanupDocumentID = activatedState.activeTab.document.id
+                try await fileAccessConnector.reassignImportedCopyCleanup(
+                    tokens: cleanupTokens,
+                    documentID: activatedState.activeTab.document.id
+                )
+                try dryRunExternalOpenCommit(
+                    preparation: refreshedPreparation,
+                    expectedState: expectedState
+                )
+                let terminalOutcome = try await recoveryStore.discardRecovery(
+                    documentID: decision.recoveryMatch.documentID
+                )
+                guard state == expectedState else {
+                    throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                        decision.recoveryMatch.documentID
+                    )
+                }
+                try await activateExistingExternalOpen(
+                    state: activatedState,
+                    provisionalDocumentID: provisionalDocumentID
+                )
+                completeExternalOpenRequest(requestID: decision.request.id)
+                recoveryNotice = terminalOutcome == .residualCleanupPending
+                    ? .residualRecoveryCleanupPending
+                    : nil
+                commitResult = .complete
+            case let .prepared(.bound(prepared, _)):
+                let result = try await
+                    discardRecoveryAndCommitPreparedBoundDocumentOpen(
+                        state: expectedState,
+                        recoveryDocumentID: decision.recoveryMatch.documentID,
+                        preparedOpen: prepared,
+                        recoveryStore: recoveryStore
+                    )
+                guard state == expectedState else {
+                    throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                        decision.recoveryMatch.documentID
+                    )
+                }
+                state = result.state
+                presentActiveFileConflictIfNeeded()
+                completeExternalOpenRequest(requestID: decision.request.id)
+                recoveryNotice = result.notice
+                commitResult = .complete
+            case let .prepared(.detached(prepared, openedFile)):
+                let result = try await
+                    discardRecoveryAndCommitPreparedDetachedDocumentOpen(
+                        state: expectedState,
+                        recoveryDocumentID: decision.recoveryMatch.documentID,
+                        preparedOpen: prepared,
+                        recoveryStore: recoveryStore
+                    )
+                guard state == expectedState else {
+                    throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                        decision.recoveryMatch.documentID
+                    )
+                }
+                state = result.transition.state
+                decisionCleanupDocumentID = result.transition.envelope.documentID
+                retainExternalOpenDetachmentNoticeIfNeeded(
+                    reason: openedFile.reason
+                )
+                let protected = await persistExternalOpenTransition(
+                    result.transition
+                )
+                completeExternalOpenRequest(requestID: decision.request.id)
+                recoveryNotice = result.notice
+                commitResult = protected
+                    ? .complete
+                    : .recoveryProtectionFailed
+            }
+            retainExternalOpenEphemeralClaimIfNeeded(
+                documentID: state.activeTab.document.id,
+                candidate: refreshedPreparation.candidate
+            )
+            retainImportedCopyCleanup(
+                documentID: decisionCleanupDocumentID,
+                tokens: cleanupTokens
+            )
+            recoveryItems.removeAll {
+                $0.documentID == decision.recoveryMatch.documentID
+            }
+            pendingExternalOpenDecision = nil
+            pendingExternalOpenRecoveryPrompt = nil
+            if commitResult == .complete {
+                _ = await retryExternalOpenCleanupIfNeeded()
+                retainExternalOpenDetachmentNoticeIfNeeded(
+                    reason: refreshedPreparation.detachmentReason
+                )
+                if recoveryNotice == .residualRecoveryCleanupPending {
+                    appendExternalOpenNotice(
+                        "Preserved work was discarded and the supplied File opened. Protected recovery marker cleanup remains."
+                    )
+                }
+                externalOpenError = nil
+                opened = true
+            } else {
+                recordExternalOpenRecoveryProtectionFailure(
+                    documentID: state.activeTab.document.id,
+                    message: recoveryError
+                )
+                opened = false
+            }
+        } catch {
+            if let preparation {
+                await retainExternalOpenPreparationForRetry(
+                    preparation,
+                    requestID: decision.request.id
+                )
+            }
+            externalOpenError = error.localizedDescription
+            opened = false
+        }
+        await finishExternalOpenAction()
+        return opened
+    }
+
+    private func beginPendingExternalOpenDecisionAction()
+        -> PendingExternalOpenDecision? {
+        guard let decision = pendingExternalOpenDecision,
+              !externalOpenInProgress,
+              !tabTransitionInProgress,
+              !fileSaveInProgress,
+              !fileSaveCleanupRequired,
+              pendingSaveAsReplacement == nil,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil else {
+            externalOpenError = PhonePadExternalOpenActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return nil
+        }
+        externalOpenInProgress = true
+        externalOpenError = nil
+        return decision
+    }
+
+    private func revalidatedExternalOpenMatch(
+        candidate: FileOpenCandidate,
+        decision: PendingExternalOpenDecision
+    ) async throws -> RecoveryFileOpenMatch {
+        let claims = try await recoveryStore.recoveryFileCollisionClaims(
+            excludingDocumentID: decision.request.documentID
+        )
+        let collision = try await fileAccessConnector.matchRecoveryFileClaims(
+            candidate: candidate,
+            claims: claims
+        )
+        switch collision {
+        case let .item(match)
+        where match.documentID == decision.recoveryMatch.documentID:
+            return match
+        case let .ambiguous(documentIDs):
+            throw PhonePadExternalOpenActionError
+                .recoveryCollisionAmbiguous(documentIDs)
+        case .none, .item:
+            throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                decision.recoveryMatch.documentID
+            )
+        }
+    }
+
+    private func applyRecoveredExternalOpen(
+        payload: PreparedExternalOpenPayload,
+        match: RecoveryFileOpenMatch,
+        envelope: RecoveryEnvelope,
+        tabID: TabID
+    ) async throws {
+        switch payload {
+        case let .bound(prepared, snapshot)
+        where match.kinds.contains(.sourceFile):
+            state = try openExternallyRecoveredBoundDocument(
+                state: state,
+                envelope: envelope,
+                tabID: tabID,
+                observation: ObservedBoundFile(
+                    binding: snapshot.openedFile.binding,
+                    providerConflictVersions: snapshot.providerConflictVersions
+                )
+            )
+            guard state.activeTab.document.id == envelope.documentID else {
+                await fileAccessConnector.stopPresenting(
+                    documentID: prepared.documentID
+                )
+                throw PhonePadExternalOpenActionError.recoveryMatchChanged(
+                    envelope.documentID
+                )
+            }
+        case .bound:
+            await stopProvisionalPresenter(payload: payload)
+            state = try openExternallyRecoveredDetachedDocument(
+                state: state,
+                envelope: envelope,
+                tabID: tabID
+            )
+        case .detached:
+            state = try openExternallyRecoveredDetachedDocument(
+                state: state,
+                envelope: envelope,
+                tabID: tabID
+            )
+        }
+    }
+
+    private func dryRunExternalOpenCommit(
+        preparation: ExternalOpenPreparation,
+        expectedState: PhonePadState
+    ) throws {
+        guard state == expectedState else {
+            throw PhonePadExternalOpenActionError.commitRequestMissing
+        }
+        switch preparation {
+        case .activateExisting:
+            return
+        case let .prepared(.bound(prepared, _)):
+            _ = try commitPreparedBoundDocumentOpen(
+                state: state,
+                prepared: prepared
+            )
+        case let .prepared(.detached(prepared, _)):
+            _ = try commitPreparedDetachedDocumentOpen(
+                state: state,
+                prepared: prepared
+            )
+        }
+    }
+
+    private func prepareAndResolveExternalOpen(
+        request: QueuedExternalOpenRequest
+    ) async throws -> Bool {
+        var authoritativeActiveOpenMatch: AuthoritativeActiveOpenMatch = .none
+        var preliminaryCleanupToken = request.importedCopyCleanupTokens.first
+        let activeLocatorMatch: ActiveFileOpenLocatorMatch
+        do {
+            activeLocatorMatch = try await fileAccessConnector
+                .matchActiveOpenLocators(
+                    selectedURL: request.request.url,
+                    claims: activeExternalOpenLocatorClaims()
+                )
+        } catch {
+            _ = try await captureImportedCopyCleanupForPreliminaryOpen(
+                request: request,
+                documentID: request.documentID
+            )
+            throw error
+        }
+        switch activeLocatorMatch {
+        case .none:
+            break
+        case let .missingItem(documentID):
+            let capturedCleanupToken = try await
+                captureImportedCopyCleanupForPreliminaryOpen(
+                    request: request,
+                    documentID: request.documentID
+                )
+            preliminaryCleanupToken = capturedCleanupToken
+                ?? preliminaryCleanupToken
+            let nodePresence = try await fileAccessConnector
+                .selectedFileNodePresence(at: request.request.url)
+            if preliminaryCleanupToken == nil,
+               nodePresence == .missing {
+                return try await activateMatchedExternalOpen(
+                    documentID: documentID,
+                    tokens: request.importedCopyCleanupTokens,
+                    requestID: request.id
+                )
+            }
+            authoritativeActiveOpenMatch = try classifyAuthoritativeActiveOpenMatch(
+                documentIDs: [documentID]
+            )
+        case let .requiresAuthoritativeRead(documentIDs):
+            authoritativeActiveOpenMatch = try classifyAuthoritativeActiveOpenMatch(
+                documentIDs: documentIDs
+            )
+        case let .ambiguous(documentIDs):
+            _ = try await captureImportedCopyCleanupForPreliminaryOpen(
+                request: request,
+                documentID: request.documentID
+            )
+            throw PhonePadExternalOpenActionError
+                .activeLocatorCollisionAmbiguous(documentIDs)
+        }
+
+        var preparation = try await readAndPrepareExternalOpen(
+            request: request.request,
+            requestID: request.id,
+            documentID: request.documentID,
+            tabID: request.tabID,
+            capturedImportedCopyCleanupToken:
+                preliminaryCleanupToken
+        )
+        if case .none = authoritativeActiveOpenMatch {
+            do {
+                authoritativeActiveOpenMatch = try
+                    classifyAuthoritativeDurableDetachedIdentityMatch(
+                        candidate: preparation.candidate
+                    )
+            } catch {
+                await retainExternalOpenPreparationForRetry(
+                    preparation,
+                    requestID: request.id
+                )
+                throw error
+            }
+        }
+        switch authoritativeActiveOpenMatch {
+        case .none:
+            break
+        case let .ephemeral(authoritativeDocumentIDs):
+            switch authoritativeEphemeralOpenMatch(
+                candidate: preparation.candidate,
+                documentIDs: authoritativeDocumentIDs
+            ) {
+            case .none:
+                invalidateExternalOpenEphemeralClaims(
+                    documentIDs: authoritativeDocumentIDs,
+                    locatorURL: preparation.candidate.locatorURL
+                )
+            case let .item(documentID):
+                if case let .activateExisting(activatedState, _, _, _, _) =
+                    preparation,
+                   activatedState.activeTab.document.id != documentID {
+                    await retainExternalOpenPreparationForRetry(
+                        preparation,
+                        requestID: request.id
+                    )
+                    let ambiguousDocumentIDs = Set([
+                        documentID,
+                        activatedState.activeTab.document.id,
+                    ]).sorted {
+                        $0.rawValue.uuidString < $1.rawValue.uuidString
+                    }
+                    throw PhonePadExternalOpenActionError
+                        .activeLocatorCollisionAmbiguous(
+                            ambiguousDocumentIDs
+                        )
+                }
+                await stopProvisionalPresenter(preparation: preparation)
+                let cleanupTokens = uniqueImportedCopyCleanupTokens(
+                    request.importedCopyCleanupTokens
+                        + [preliminaryCleanupToken]
+                            .compactMap { $0 }
+                        + [preparation.importedCopyCleanupToken]
+                            .compactMap { $0 }
+                )
+                try await fileAccessConnector.reassignImportedCopyCleanup(
+                    tokens: cleanupTokens,
+                    documentID: documentID
+                )
+                return try await activateMatchedExternalOpen(
+                    documentID: documentID,
+                    tokens: cleanupTokens,
+                    requestID: request.id
+                )
+            case let .ambiguous(documentIDs):
+                await retainExternalOpenPreparationForRetry(
+                    preparation,
+                    requestID: request.id
+                )
+                throw PhonePadExternalOpenActionError
+                    .activeLocatorCollisionAmbiguous(documentIDs)
+            }
+        case let .durable(documentID):
+            do {
+                preparation = try reconcileAuthoritativeDurableExternalOpen(
+                    preparation: preparation,
+                    documentID: documentID
+                )
+            } catch {
+                await retainExternalOpenPreparationForRetry(
+                    preparation,
+                    requestID: request.id
+                )
+                throw error
+            }
+        }
+        let payload: PreparedExternalOpenPayload
+        switch preparation {
+        case let .activateExisting(
+            activatedState,
+            provisionalDocumentID,
+            candidate,
+            cleanupToken,
+            detachmentReason
+        ):
+            let cleanupDocumentID = activatedState.activeTab.document.id
+            let cleanupTokens = uniqueImportedCopyCleanupTokens(
+                request.importedCopyCleanupTokens
+                    + [cleanupToken].compactMap { $0 }
+            )
+            try await fileAccessConnector.reassignImportedCopyCleanup(
+                tokens: cleanupTokens,
+                documentID: cleanupDocumentID
+            )
+            try await activateExistingExternalOpen(
+                state: activatedState,
+                provisionalDocumentID: provisionalDocumentID
+            )
+            retainExternalOpenEphemeralClaimIfNeeded(
+                documentID: cleanupDocumentID,
+                candidate: candidate
+            )
+            retainImportedCopyCleanup(
+                documentID: cleanupDocumentID,
+                tokens: cleanupTokens
+            )
+            completeExternalOpenRequest(requestID: request.id)
+            _ = await retryExternalOpenCleanupIfNeeded()
+            retainExternalOpenDetachmentNoticeIfNeeded(
+                reason: detachmentReason
+            )
+            return true
+        case let .prepared(preparedPayload):
+            payload = preparedPayload
+        }
+
+        do {
+            let claims = try await recoveryStore.recoveryFileCollisionClaims(
+                excludingDocumentID: request.documentID
+            )
+            let collision = try await fileAccessConnector
+                .matchRecoveryFileClaims(
+                    candidate: payload.candidate,
+                    claims: claims
+                )
+            switch collision {
+            case .none:
+                let result = try await commitExternalOpen(
+                    payload: payload,
+                    request: request
+                )
+                return result == .complete
+            case let .item(match):
+                guard let envelope = try await recoveryStore.load(
+                    documentID: match.documentID
+                ) else {
+                    throw PhonePadExternalOpenActionError
+                        .recoveryItemMissing(match.documentID)
+                }
+                let cleanupTokens = uniqueImportedCopyCleanupTokens(
+                    request.importedCopyCleanupTokens
+                        + [payload.importedCopyCleanupToken]
+                            .compactMap { $0 }
+                )
+                try await fileAccessConnector.reassignImportedCopyCleanup(
+                    tokens: cleanupTokens,
+                    documentID: match.documentID
+                )
+                await stopProvisionalPresenter(payload: payload)
+                if match.kinds == [.pendingSaveAsDestination],
+                   state.tabs.contains(where: { tab in
+                       tab.document.id == match.documentID
+                   }) {
+                    return try await activateMatchedExternalOpen(
+                        documentID: match.documentID,
+                        tokens: cleanupTokens,
+                        requestID: request.id
+                    )
+                }
+                pendingExternalOpenDecision = PendingExternalOpenDecision(
+                    request: request,
+                    recoveryMatch: match,
+                    importedCopyCleanupTokens: cleanupTokens
+                )
+                pendingExternalOpenRecoveryPrompt = PendingExternalOpenRecoveryPrompt(
+                    recoveryDocumentID: match.documentID,
+                    title: envelope.title
+                )
+                externalOpenError = nil
+                return true
+            case let .ambiguous(documentIDs):
+                throw PhonePadExternalOpenActionError
+                    .recoveryCollisionAmbiguous(documentIDs)
+            }
+        } catch {
+            await retainExternalOpenPreparationForRetry(
+                .prepared(payload),
+                requestID: request.id
+            )
+            throw error
+        }
+    }
+
+    private func captureImportedCopyCleanupForPreliminaryOpen(
+        request: QueuedExternalOpenRequest,
+        documentID: DocumentID
+    ) async throws -> ImportedCopyCleanupToken? {
+        guard request.request.accessIntent == .copyRequired else {
+            return nil
+        }
+        if let capturedToken = request.importedCopyCleanupTokens.first {
+            return capturedToken
+        }
+        let token = try await fileAccessConnector.captureImportedCopyCleanup(
+            at: request.request.url,
+            documentID: documentID
+        )
+        retainImportedCopyCleanupTokenForRetry(
+            token,
+            requestID: request.id
+        )
+        return token
+    }
+
+    private func activateMatchedExternalOpen(
+        documentID: DocumentID,
+        tokens: [ImportedCopyCleanupToken],
+        requestID: UUID
+    ) async throws -> Bool {
+        guard let tab = state.tabs.first(where: { tab in
+            tab.document.id == documentID
+        }) else {
+            throw PhonePadStateError.documentMissing(documentID)
+        }
+        state = try PhonePadCore.selectTab(
+            state: state,
+            tabID: tab.id
+        )
+        retainImportedCopyCleanup(
+            documentID: documentID,
+            tokens: uniqueImportedCopyCleanupTokens(tokens)
+        )
+        completeExternalOpenRequest(requestID: requestID)
+        _ = await retryExternalOpenCleanupIfNeeded()
+        presentActiveFileConflictIfNeeded()
+        return true
+    }
+
+    private func classifyAuthoritativeActiveOpenMatch(
+        documentIDs: [DocumentID]
+    ) throws -> AuthoritativeActiveOpenMatch {
+        let orderedDocumentIDs = Array(Set(documentIDs)).sorted {
+            $0.rawValue.uuidString < $1.rawValue.uuidString
+        }
+        guard !orderedDocumentIDs.isEmpty else {
+            return .none
+        }
+        let durableDocumentIDs = try orderedDocumentIDs.filter { documentID in
+            guard let document = state.tabs.first(where: { tab in
+                tab.document.id == documentID
+            })?.document else {
+                throw PhonePadStateError.documentMissing(documentID)
+            }
+            return document.fileBinding != nil
+                || document.recoveryFileReference != nil
+        }
+        guard !durableDocumentIDs.isEmpty else {
+            return .ephemeral(orderedDocumentIDs)
+        }
+        guard orderedDocumentIDs.count == 1,
+              durableDocumentIDs.count == 1,
+              let documentID = durableDocumentIDs.first else {
+            throw PhonePadExternalOpenActionError
+                .activeLocatorCollisionAmbiguous(orderedDocumentIDs)
+        }
+        return .durable(documentID)
+    }
+
+    private func classifyAuthoritativeDurableDetachedIdentityMatch(
+        candidate: FileOpenCandidate
+    ) throws -> AuthoritativeActiveOpenMatch {
+        guard let candidateIdentity = candidate.identity else {
+            return .none
+        }
+        let documentIDs = state.tabs.compactMap { tab -> DocumentID? in
+            guard tab.document.fileBinding == nil,
+                  tab.document.recoveryFileReference?.identity
+                    == candidateIdentity else {
+                return nil
+            }
+            return tab.document.id
+        }
+        return try classifyAuthoritativeActiveOpenMatch(
+            documentIDs: documentIDs
+        )
+    }
+
+    private func reconcileAuthoritativeDurableExternalOpen(
+        preparation: ExternalOpenPreparation,
+        documentID: DocumentID
+    ) throws -> ExternalOpenPreparation {
+        guard let tab = state.tabs.first(where: { tab in
+            tab.document.id == documentID
+        }) else {
+            throw PhonePadStateError.documentMissing(documentID)
+        }
+        switch preparation {
+        case let .activateExisting(
+            activatedState,
+            _,
+            candidate,
+            _,
+            _
+        ):
+            guard activatedState.activeTab.document.id == documentID else {
+                let documentIDs = Set([
+                    documentID,
+                    activatedState.activeTab.document.id,
+                ]).sorted {
+                    $0.rawValue.uuidString < $1.rawValue.uuidString
+                }
+                throw PhonePadExternalOpenActionError
+                    .activeLocatorCollisionAmbiguous(documentIDs)
+            }
+            if tab.document.fileBinding == nil,
+               let reference = tab.document.recoveryFileReference {
+                try requireMatchingDurableDetachedSource(
+                    reference: reference,
+                    candidate: candidate,
+                    documentID: documentID
+                )
+            }
+            return preparation
+        case let .prepared(payload):
+            let activatedState: PhonePadState
+            if tab.document.fileBinding != nil {
+                switch payload {
+                case let .bound(_, snapshot):
+                    let reconciledState = try reconcileBoundDocument(
+                        state: state,
+                        documentID: documentID,
+                        observation: ObservedBoundFile(
+                            binding: snapshot.openedFile.binding,
+                            providerConflictVersions:
+                                snapshot.providerConflictVersions
+                        )
+                    )
+                    activatedState = try PhonePadCore.selectTab(
+                        state: reconciledState,
+                        tabID: tab.id
+                    )
+                case .detached:
+                    activatedState = try
+                        activateAuthoritativelyMatchedBoundFileOpen(
+                            state: state,
+                            documentID: documentID,
+                            candidate: payload.candidate
+                        )
+                }
+            } else if let reference = tab.document.recoveryFileReference {
+                try requireMatchingDurableDetachedSource(
+                    reference: reference,
+                    candidate: payload.candidate,
+                    documentID: documentID
+                )
+                activatedState = try PhonePadCore.selectTab(
+                    state: state,
+                    tabID: tab.id
+                )
+            } else {
+                throw RecoveredFileOpenError.fileReferenceMissing(documentID)
+            }
+            return .activateExisting(
+                state: activatedState,
+                provisionalDocumentID: payload.provisionalDocumentID,
+                candidate: payload.candidate,
+                importedCopyCleanupToken:
+                    payload.importedCopyCleanupToken,
+                detachmentReason: payload.detachmentReason
+            )
+        }
+    }
+
+    private func requireMatchingDurableDetachedSource(
+        reference: RecoveryFileReference,
+        candidate: FileOpenCandidate,
+        documentID: DocumentID
+    ) throws {
+        switch (reference.identity, candidate.identity) {
+        case let (.some(referenceIdentity), .some(candidateIdentity))
+        where referenceIdentity == candidateIdentity:
+            break
+        case (.none, .none):
+            break
+        case (.some, .some), (.some, .none), (.none, .some):
+            throw PhonePadExternalOpenActionError
+                .durableDetachedSourceIdentityChanged(documentID)
+        }
+        switch candidate.providerConflictVersions {
+        case .none:
+            break
+        case let .unresolved(count):
+            throw PhonePadExternalOpenActionError
+                .durableDetachedSourceHasUnresolvedProviderVersions(
+                    documentID: documentID,
+                    count: count
+                )
+        }
+        guard reference.cleanDigest == candidate.digest else {
+            throw PhonePadExternalOpenActionError
+                .durableDetachedSourceContentChanged(documentID)
+        }
+    }
+
+    private func activeExternalOpenLocatorClaims()
+        -> [ActiveFileOpenLocatorClaim] {
+        let ephemeralDocumentIDs = Set(
+            state.tabs.compactMap { tab -> DocumentID? in
+                guard tab.document.fileBinding == nil,
+                      tab.document.recoveryFileReference == nil else {
+                    return nil
+                }
+                return tab.document.id
+            }
+        )
+        externalOpenEphemeralClaims = externalOpenEphemeralClaims
+            .filter { documentID, _ in
+                ephemeralDocumentIDs.contains(documentID)
+            }
+
+        return state.tabs.flatMap { tab -> [ActiveFileOpenLocatorClaim] in
+            if let binding = tab.document.fileBinding {
+                return [
+                    .bound(
+                        documentID: tab.document.id,
+                        binding: binding
+                    ),
+                ]
+            }
+            if let reference = tab.document.recoveryFileReference {
+                return [
+                    .detached(
+                        documentID: tab.document.id,
+                        reference: FileCollisionReference(
+                            bookmark: reference.bookmark,
+                            identity: reference.identity
+                        )
+                    ),
+                ]
+            }
+            return externalOpenEphemeralClaims[tab.document.id, default: []]
+                .sorted { lhs, rhs in
+                    lhs.candidate.locatorURL.absoluteString
+                        < rhs.candidate.locatorURL.absoluteString
+                }
+                .map { claim in
+                    .ephemeral(
+                        documentID: tab.document.id,
+                        locatorURL: claim.candidate.locatorURL
+                    )
+                }
+        }
+    }
+
+    private func retainExternalOpenEphemeralClaimIfNeeded(
+        documentID: DocumentID,
+        candidate: FileOpenCandidate
+    ) {
+        guard let document = state.tabs.first(where: { tab in
+            tab.document.id == documentID
+        })?.document,
+        document.fileBinding == nil,
+        document.recoveryFileReference == nil else {
+            externalOpenEphemeralClaims.removeValue(forKey: documentID)
+            return
+        }
+        let standardizedCandidate = FileOpenCandidate(
+            locatorURL: candidate.locatorURL.standardizedFileURL,
+            identity: candidate.identity,
+            digest: candidate.digest,
+            providerConflictVersions: candidate.providerConflictVersions
+        )
+        var claims = externalOpenEphemeralClaims[documentID, default: []]
+        claims.removeAll { claim in
+            claim.candidate.locatorURL.standardizedFileURL
+                == standardizedCandidate.locatorURL
+        }
+        claims.append(
+            ExternalOpenEphemeralClaim(candidate: standardizedCandidate)
+        )
+        externalOpenEphemeralClaims[documentID] = claims
+    }
+
+    private func authoritativeEphemeralOpenMatch(
+        candidate: FileOpenCandidate,
+        documentIDs: [DocumentID]
+    ) -> AuthoritativeEphemeralOpenMatch {
+        let expectedDocumentIDs = Set(documentIDs)
+        let matchingDocumentIDs = externalOpenEphemeralClaims.compactMap {
+            documentID,
+            claims -> DocumentID? in
+            guard expectedDocumentIDs.contains(documentID),
+                  claims.contains(where: { claim in
+                      externalOpenCandidate(
+                          candidate,
+                          matches: claim.candidate
+                      )
+                  }) else {
+                return nil
+            }
+            return documentID
+        }.sorted {
+            $0.rawValue.uuidString < $1.rawValue.uuidString
+        }
+        switch matchingDocumentIDs.count {
+        case 0:
+            return .none
+        case 1:
+            return .item(matchingDocumentIDs[0])
+        default:
+            return .ambiguous(matchingDocumentIDs)
+        }
+    }
+
+    private func invalidateExternalOpenEphemeralClaims(
+        documentIDs: [DocumentID],
+        locatorURL: URL
+    ) {
+        let expectedDocumentIDs = Set(documentIDs)
+        let standardizedLocator = locatorURL.standardizedFileURL
+        for documentID in expectedDocumentIDs {
+            guard let existingClaims = externalOpenEphemeralClaims[documentID]
+            else {
+                continue
+            }
+            let retainedClaims = existingClaims.filter { claim in
+                claim.candidate.locatorURL.standardizedFileURL
+                    != standardizedLocator
+            }
+            if retainedClaims.isEmpty {
+                externalOpenEphemeralClaims.removeValue(forKey: documentID)
+            } else {
+                externalOpenEphemeralClaims[documentID] = retainedClaims
+            }
+        }
+    }
+
+    private func readAndPrepareExternalOpen(
+        request: PhonePadExternalOpenRequest,
+        requestID: UUID,
+        documentID: DocumentID,
+        tabID: TabID,
+        capturedImportedCopyCleanupToken:
+            ImportedCopyCleanupToken?
+    ) async throws -> ExternalOpenPreparation {
+        let outcome: OpenTextFileOutcome
+        if let capturedImportedCopyCleanupToken {
+            outcome = try await fileAccessConnector.openTextFile(
+                at: request.url,
+                documentID: documentID,
+                capturedImportedCopyCleanupToken:
+                    capturedImportedCopyCleanupToken
+            )
+        } else {
+            outcome = try await fileAccessConnector.openTextFile(
+                at: request.url,
+                documentID: documentID,
+                accessIntent: request.accessIntent
+            )
+        }
+        switch outcome {
+        case let .bound(snapshot):
+            let preparation = prepareBoundDocumentOpen(
+                state: state,
+                documentID: documentID,
+                tabID: tabID,
+                text: snapshot.openedFile.text,
+                observation: ObservedBoundFile(
+                    binding: snapshot.openedFile.binding,
+                    providerConflictVersions: snapshot.providerConflictVersions
+                )
+            )
+            switch preparation {
+            case let .activateExisting(activatedState):
+                return .activateExisting(
+                    state: activatedState,
+                    provisionalDocumentID: documentID,
+                    candidate: FileOpenCandidate(
+                        locatorURL: snapshot.openedFile.binding.locatorURL,
+                        identity: snapshot.openedFile.binding.identity,
+                        digest: snapshot.openedFile.binding.digest,
+                        providerConflictVersions: snapshot.providerConflictVersions
+                    ),
+                    importedCopyCleanupToken: nil,
+                    detachmentReason: nil
+                )
+            case let .prepared(prepared):
+                return .prepared(
+                    .bound(prepared: prepared, snapshot: snapshot)
+                )
+            }
+        case let .detached(openedFile):
+            let preparation: DetachedDocumentOpenPreparation
+            do {
+                preparation = try prepareDetachedDocumentOpen(
+                    state: state,
+                    documentID: documentID,
+                    tabID: tabID,
+                    snapshot: openedFile.snapshot,
+                    editedAt: Date()
+                )
+            } catch {
+                retainImportedCopyCleanupTokenForRetry(
+                    openedFile.importedCopyCleanupToken,
+                    requestID: requestID
+                )
+                throw error
+            }
+            switch preparation {
+            case let .activateExisting(activatedState):
+                return .activateExisting(
+                    state: activatedState,
+                    provisionalDocumentID: documentID,
+                    candidate: openedFile.snapshot.candidate,
+                    importedCopyCleanupToken: openedFile
+                        .importedCopyCleanupToken,
+                    detachmentReason: openedFile.reason
+                )
+            case let .prepared(prepared):
+                return .prepared(
+                    .detached(
+                        prepared: prepared,
+                        openedFile: openedFile
+                    )
+                )
+            }
+        case let .rejected(rejection):
+            guard let cleanupToken = rejection.importedCopyCleanupToken else {
+                completeRejectedExternalOpenRequest(requestID: requestID)
+                throw rejection.error
+            }
+            let cleanupOutcome = await fileAccessConnector
+                .cleanupImportedCopy(token: cleanupToken)
+            switch cleanupOutcome {
+            case .removed, .alreadyAbsent:
+                completeRejectedExternalOpenRequest(requestID: requestID)
+                throw rejection.error
+            case let .residual(failure):
+                retainImportedCopyCleanup(
+                    documentID: nil,
+                    tokens: [cleanupToken]
+                )
+                let actionError = PhonePadExternalOpenActionError
+                    .rejectedFileCleanupFailed(
+                        rejection: rejection.error,
+                        cleanup: failure
+                    )
+                externalOpenGeneralNotice = actionError.localizedDescription
+                completeRejectedExternalOpenRequest(requestID: requestID)
+                throw actionError
+            }
+        }
+    }
+
+    private func completeRejectedExternalOpenRequest(requestID: UUID) {
+        if pendingExternalOpenDecision?.request.id == requestID {
+            pendingExternalOpenDecision = nil
+            pendingExternalOpenRecoveryPrompt = nil
+        }
+        completeExternalOpenRequest(requestID: requestID)
+        terminalExternalOpenErrorPendingDismissal = true
+    }
+
+    private func activateExistingExternalOpen(
+        state activatedState: PhonePadState,
+        provisionalDocumentID: DocumentID
+    ) async throws {
+        let retainedDocument = activatedState.activeTab.document
+        if let retainedBinding = retainedDocument.fileBinding {
+            do {
+                try await fileAccessConnector.startPresenting(
+                    documentID: retainedDocument.id,
+                    binding: retainedBinding
+                )
+            } catch {
+                await fileAccessConnector.stopPresenting(
+                    documentID: provisionalDocumentID
+                )
+                throw error
+            }
+        }
+        await fileAccessConnector.stopPresenting(
+            documentID: provisionalDocumentID
+        )
+        state = activatedState
+        presenterRefreshPending = true
+        presentActiveFileConflictIfNeeded()
+    }
+
+    private func commitExternalOpen(
+        payload: PreparedExternalOpenPayload,
+        request: QueuedExternalOpenRequest
+    ) async throws -> ExternalOpenCommitResult {
+        switch payload {
+        case let .bound(prepared, _):
+            retainImportedCopyCleanup(
+                documentID: nil,
+                tokens: request.importedCopyCleanupTokens
+            )
+            state = try commitPreparedBoundDocumentOpen(
+                state: state,
+                prepared: prepared
+            )
+            retainExternalOpenEphemeralClaimIfNeeded(
+                documentID: state.activeTab.document.id,
+                candidate: prepared.candidate
+            )
+            presentActiveFileConflictIfNeeded()
+            completeExternalOpenRequest(requestID: request.id)
+            _ = await retryExternalOpenCleanupIfNeeded()
+            return .complete
+        case let .detached(prepared, openedFile):
+            let transition = try commitPreparedDetachedDocumentOpen(
+                state: state,
+                prepared: prepared
+            )
+            state = transition.state
+            retainExternalOpenDetachmentNoticeIfNeeded(
+                reason: openedFile.reason
+            )
+            retainExternalOpenEphemeralClaimIfNeeded(
+                documentID: transition.envelope.documentID,
+                candidate: openedFile.snapshot.candidate
+            )
+            retainImportedCopyCleanup(
+                documentID: transition.envelope.documentID,
+                tokens: uniqueImportedCopyCleanupTokens(
+                    request.importedCopyCleanupTokens
+                        + [openedFile.importedCopyCleanupToken]
+                            .compactMap { $0 }
+                )
+            )
+            let protected = await persistExternalOpenTransition(transition)
+            completeExternalOpenRequest(requestID: request.id)
+            guard protected else {
+                recordExternalOpenRecoveryProtectionFailure(
+                    documentID: transition.envelope.documentID,
+                    message: recoveryError
+                )
+                return .recoveryProtectionFailed
+            }
+            _ = await retryExternalOpenCleanupIfNeeded()
+            retainExternalOpenDetachmentNoticeIfNeeded(
+                reason: openedFile.reason
+            )
+            return .complete
+        }
+    }
+
+    private func retainExternalOpenDetachmentNoticeIfNeeded(
+        reason: FileOpenDetachmentReason?
+    ) {
+        guard let reason,
+              state.activeTab.document.fileBinding == nil,
+              state.activeTab.document.isUnsaved else {
+            return
+        }
+        externalOpenDocumentNotice = ExternalOpenDocumentNotice(
+            documentID: state.activeTab.document.id,
+            message: externalOpenDetachmentNotice(reason: reason)
+        )
+    }
+
+    private func appendExternalOpenNotice(_ notice: String) {
+        guard externalOpenGeneralNotice != notice,
+              externalOpenGeneralNotice?.contains(notice) != true else {
+            return
+        }
+        if let externalOpenGeneralNotice {
+            self.externalOpenGeneralNotice = externalOpenGeneralNotice
+                + " " + notice
+        } else {
+            externalOpenGeneralNotice = notice
+        }
+    }
+
+    private func stopProvisionalPresenter(
+        payload: PreparedExternalOpenPayload
+    ) async {
+        guard case let .bound(prepared, _) = payload else {
+            return
+        }
+        await fileAccessConnector.stopPresenting(
+            documentID: prepared.documentID
+        )
+    }
+
+    private func stopProvisionalPresenter(
+        preparation: ExternalOpenPreparation
+    ) async {
+        switch preparation {
+        case let .activateExisting(_, provisionalDocumentID, _, _, _):
+            await fileAccessConnector.stopPresenting(
+                documentID: provisionalDocumentID
+            )
+        case let .prepared(payload):
+            await stopProvisionalPresenter(payload: payload)
+        }
+    }
+
+    private func retainExternalOpenPreparationForRetry(
+        _ preparation: ExternalOpenPreparation,
+        requestID: UUID
+    ) async {
+        await stopProvisionalPresenter(preparation: preparation)
+        retainImportedCopyCleanupTokenForRetry(
+            preparation.importedCopyCleanupToken,
+            requestID: requestID
+        )
+    }
+
+    private func retainImportedCopyCleanupTokenForRetry(
+        _ token: ImportedCopyCleanupToken?,
+        requestID: UUID
+    ) {
+        guard let token else {
+            return
+        }
+        if let decision = pendingExternalOpenDecision,
+           decision.request.id == requestID {
+            pendingExternalOpenDecision = PendingExternalOpenDecision(
+                request: decision.request,
+                recoveryMatch: decision.recoveryMatch,
+                importedCopyCleanupTokens:
+                    uniqueImportedCopyCleanupTokens(
+                        decision.importedCopyCleanupTokens + [token]
+                    )
+            )
+            return
+        }
+        guard let requestIndex = externalOpenQueue.firstIndex(where: {
+            $0.id == requestID
+        }) else {
+            retainImportedCopyCleanup(
+                documentID: nil,
+                tokens: [token]
+            )
+            return
+        }
+        let request = externalOpenQueue[requestIndex]
+        externalOpenQueue[requestIndex] = QueuedExternalOpenRequest(
+            id: request.id,
+            request: request.request,
+            documentID: request.documentID,
+            tabID: request.tabID,
+            importedCopyCleanupTokens: uniqueImportedCopyCleanupTokens(
+                request.importedCopyCleanupTokens + [token]
+            ),
+            importedCopyCleanupCapture:
+                request.importedCopyCleanupCapture
+        )
+    }
+
+    private var canBeginExternalOpenAction: Bool {
+        !externalOpenInProgress
+            && !externalOpenCleanupInProgress
+            && !tabTransitionInProgress
+            && !fileSaveInProgress
+            && !fileSaveCleanupRequired
+            && pendingSaveAsReplacement == nil
+            && activeRecoveryAction == nil
+            && pendingTabCloseSession == nil
+            && pendingExternalOpenDecision == nil
+            && !fileConflictResolutionIsPresented
+    }
+
+    private func requestExternalOpenEditorCommitIfPossible() {
+        guard let request = externalOpenQueue.first else {
+            return
+        }
+        guard !externalOpenCleanupPreflightInProgress else {
+            return
+        }
+        guard !importedCopyCleanupPreflightRequired(request: request) else {
+            if let failure = externalOpenCleanupPreflightFailures[request.id] {
+                externalOpenError = failure.message
+            }
+            return
+        }
+        guard presentersShouldBeActive,
+              externalOpenCommitRequestID == nil,
+              externalOpenError == nil
+                || externalOpenError
+                    == importedCopyCleanupJournalErrorMessage,
+              canBeginExternalOpenAction else {
+            return
+        }
+        externalOpenCommitRequestID = UUID()
+    }
+
+    private func completeExternalOpenRequest(requestID: UUID) {
+        guard externalOpenQueue.first?.id == requestID else {
+            externalOpenError = PhonePadExternalOpenActionError
+                .commitRequestMissing
+                .localizedDescription
+            return
+        }
+        externalOpenQueue.removeFirst()
+        externalOpenCleanupPreflightFailures.removeValue(forKey: requestID)
+        if externalOpenError != importedCopyCleanupJournalErrorMessage {
+            externalOpenError = nil
+        }
+    }
+
+    private func finishExternalOpenAction() async {
+        if !presentersShouldBeActive {
+            await fileAccessConnector.pausePresenters()
+            presenterRefreshPending = true
+        }
+        externalOpenInProgress = false
+        externalOpenCommitRequestID = nil
+        await resumePendingActivationWorkAfterExclusiveAction()
+    }
+
+    private func persistExternalOpenTransition(
+        _ transition: RecoveryEditTransition
+    ) async -> Bool {
+        await cancelAndAwaitCheckpointTask()
+        guard pendingCheckpoint == nil, failedCheckpoint == nil else {
+            recoveryError = PhonePadTabTransitionError
+                .checkpointMustFinishBeforeTransition
+                .localizedDescription
+            return false
+        }
+        editGeneration += 1
+        let now = checkpointClock.now
+        let checkpoint = PendingRecoveryCheckpoint(
+            generation: editGeneration,
+            previousState: transition.state,
+            text: transition.envelope.text,
+            editedAt: transition.envelope.editedAt,
+            firstPendingAt: now,
+            lastEditAt: now,
+            requiresImmediateCheckpoint: true
+        )
+        pendingCheckpoint = checkpoint
+        let outcome = await persist(checkpoint: checkpoint)
+        return outcome == .persisted
+    }
+
+    private func retainImportedCopyCleanup(
+        documentID: DocumentID?,
+        tokens: [ImportedCopyCleanupToken]
+    ) {
+        guard !tokens.isEmpty else {
+            return
+        }
+        pendingExternalOpenCleanups.append(
+            PendingImportedCopyCleanup(
+                documentID: documentID,
+                tokens: tokens
+            )
+        )
+        refreshExternalOpenCleanupAvailability()
+    }
+
+    @discardableResult
+    private func retryExternalOpenCleanupIfNeeded() async -> Bool {
+        guard !pendingExternalOpenCleanups.isEmpty else {
+            refreshExternalOpenCleanupAvailability()
+            return true
+        }
+        var remainingCleanups: [PendingImportedCopyCleanup] = []
+        var failureMessages: [String] = []
+        for cleanup in pendingExternalOpenCleanups {
+            guard importedCopyCleanupIsRunnable(cleanup) else {
+                remainingCleanups.append(cleanup)
+                continue
+            }
+            var remainingTokens: [ImportedCopyCleanupToken] = []
+            for token in cleanup.tokens {
+                let outcome = await fileAccessConnector.cleanupImportedCopy(
+                    token: token
+                )
+                switch outcome {
+                case .removed, .alreadyAbsent:
+                    break
+                case let .residual(failure):
+                    remainingTokens.append(token)
+                    failureMessages.append(
+                        importedCopyCleanupFailureMessage(failure)
+                    )
+                }
+            }
+            if !remainingTokens.isEmpty {
+                remainingCleanups.append(
+                    PendingImportedCopyCleanup(
+                        documentID: cleanup.documentID,
+                        tokens: remainingTokens
+                    )
+                )
+            }
+        }
+        pendingExternalOpenCleanups = remainingCleanups
+        refreshExternalOpenCleanupAvailability()
+        guard failureMessages.isEmpty else {
+            externalOpenGeneralNotice = failureMessages.joined(separator: " ")
+            return false
+        }
+        externalOpenGeneralNotice = remainingCleanups.isEmpty
+            ? "Imported File copy cleanup finished."
+            : nil
+        return true
+    }
+
+    @discardableResult
+    private func reconcileImportedCopyCleanupJournal() async -> Bool {
+        do {
+            let report = try await fileAccessConnector
+                .reconcileImportedCopyCleanupJournal()
+            let reportedItems = report.removed
+                + report.alreadyAbsent
+                + report.awaitingProtection
+                + report.residuals.map(\.item)
+            removePendingImportedCopyCleanupTokens(
+                Set(reportedItems.map(\.token))
+            )
+
+            var retainedResiduals: [ImportedCopyCleanupResidual] = []
+            for residual in report.residuals {
+                if try await orphanedImportedCopyCandidateChange(
+                    residual
+                ) {
+                    try await fileAccessConnector
+                        .abandonImportedCopyCleanup(
+                            tokens: [residual.item.token]
+                        )
+                } else {
+                    retainedResiduals.append(residual)
+                }
+            }
+            importedCopyCleanupJournalRetryRequired =
+                !retainedResiduals.isEmpty
+            var residualMessages = retainedResiduals.map { residual in
+                retainImportedCopyCleanup(
+                    documentID: residual.item.documentID,
+                    tokens: [residual.item.token]
+                )
+                return importedCopyCleanupFailureMessage(residual.failure)
+            }
+            var awaitingProtectionMessages: [String] = []
+            for item in report.awaitingProtection {
+                guard try await importedCopyCleanupIsProtected(
+                    documentID: item.documentID
+                ) else {
+                    importedCopyCleanupJournalRetryRequired = true
+                    awaitingProtectionMessages.append(
+                        "Interrupted imported File cleanup for Document \(item.documentID.rawValue.uuidString) is waiting for protected recovery data. Restore or protect that Document, then retry cleanup."
+                    )
+                    continue
+                }
+
+                let outcome = await fileAccessConnector.cleanupImportedCopy(
+                    token: item.token
+                )
+                switch outcome {
+                case .removed, .alreadyAbsent:
+                    break
+                case let .residual(failure):
+                    importedCopyCleanupJournalRetryRequired = true
+                    retainImportedCopyCleanup(
+                        documentID: item.documentID,
+                        tokens: [item.token]
+                    )
+                    residualMessages.append(
+                        importedCopyCleanupFailureMessage(failure)
+                    )
+                }
+            }
+
+            setImportedCopyCleanupJournalError(
+                residualMessages.isEmpty
+                    ? nil
+                    : residualMessages.joined(separator: " ")
+            )
+            importedCopyCleanupJournalNotice = awaitingProtectionMessages
+                .isEmpty
+                ? nil
+                : awaitingProtectionMessages.joined(separator: " ")
+            refreshExternalOpenCleanupAvailability()
+            guard residualMessages.isEmpty,
+                  awaitingProtectionMessages.isEmpty else {
+                return false
+            }
+            return true
+        } catch {
+            importedCopyCleanupJournalRetryRequired = true
+            importedCopyCleanupJournalNotice = nil
+            refreshExternalOpenCleanupAvailability()
+            setImportedCopyCleanupJournalError(
+                "Interrupted imported File cleanup reconciliation failed. \(error.localizedDescription) Retry Cleanup."
+            )
+            return false
+        }
+    }
+
+    private func setImportedCopyCleanupJournalError(_ message: String?) {
+        if externalOpenError == importedCopyCleanupJournalErrorMessage {
+            externalOpenError = nil
+        }
+        importedCopyCleanupJournalErrorMessage = message
+        if let message {
+            externalOpenError = message
+        }
+    }
+
+    private func recordExternalOpenRecoveryProtectionFailure(
+        documentID: DocumentID,
+        message: String?
+    ) {
+        guard let message else {
+            externalOpenRecoveryProtectionFailure = nil
+            externalOpenError = nil
+            return
+        }
+        externalOpenRecoveryProtectionFailure =
+            ExternalOpenRecoveryProtectionFailure(
+                documentID: documentID,
+                message: message
+            )
+        externalOpenError = message
+    }
+
+    private func clearExternalOpenRecoveryProtectionFailure(
+        documentID: DocumentID
+    ) {
+        guard let failure = externalOpenRecoveryProtectionFailure,
+              failure.documentID == documentID else {
+            return
+        }
+        if externalOpenError == failure.message {
+            externalOpenError = nil
+        }
+        externalOpenRecoveryProtectionFailure = nil
+    }
+
+    private func removePendingImportedCopyCleanupTokens(
+        _ tokens: Set<ImportedCopyCleanupToken>
+    ) {
+        guard !tokens.isEmpty else {
+            return
+        }
+        pendingExternalOpenCleanups = pendingExternalOpenCleanups.compactMap {
+            cleanup in
+            let remainingTokens = cleanup.tokens.filter { token in
+                !tokens.contains(token)
+            }
+            guard !remainingTokens.isEmpty else {
+                return nil
+            }
+            return PendingImportedCopyCleanup(
+                documentID: cleanup.documentID,
+                tokens: remainingTokens
+            )
+        }
+    }
+
+    private func importedCopyCleanupIsProtected(
+        documentID: DocumentID
+    ) async throws -> Bool {
+        if let document = state.tabs.first(where: { tab in
+            tab.document.id == documentID
+        })?.document {
+            switch document.recoveryState {
+            case .clean, .protectedUnsaved:
+                return true
+            case .checkpointPending:
+                break
+            }
+        }
+        return try await recoveryStore.load(documentID: documentID) != nil
+    }
+
+    private func orphanedImportedCopyCandidateChange(
+        _ residual: ImportedCopyCleanupResidual
+    ) async throws -> Bool {
+        guard residual.failure == .itemChanged else {
+            return false
+        }
+        let isProtected = try await importedCopyCleanupIsProtected(
+            documentID: residual.item.documentID
+        )
+        return !isProtected
+    }
+
+    private var deferredImportedCopyCleanupDocumentID: DocumentID? {
+        pendingExternalOpenCleanups.first(where: { cleanup in
+            cleanup.documentID != nil
+                && !importedCopyCleanupIsRunnable(cleanup)
+        })?.documentID
+    }
+
+    private func importedCopyCleanupIsRunnable(
+        _ cleanup: PendingImportedCopyCleanup
+    ) -> Bool {
+        guard let documentID = cleanup.documentID,
+              let document = state.tabs.first(where: { tab in
+                  tab.document.id == documentID
+              })?.document else {
+            return true
+        }
+        switch document.recoveryState {
+        case .clean, .protectedUnsaved:
+            return true
+        case .checkpointPending:
+            return false
+        }
+    }
+
+    private func refreshExternalOpenCleanupAvailability() {
+        externalOpenCleanupRequired = importedCopyCleanupJournalRetryRequired
+            || pendingExternalOpenCleanups.contains(
+                where: importedCopyCleanupIsRunnable
+            )
+    }
+
     func clearFileSaveFeedback() {
         guard !fileSaveCleanupRequired else {
             return
@@ -869,9 +3255,9 @@ final class PhonePadAppModel: ObservableObject {
         selectedURL: URL,
         after committedDocument: CommittedEditorDocument
     ) async -> Bool {
-        guard !tabTransitionInProgress,
-              activeRecoveryAction == nil,
-              pendingTabCloseSession == nil else {
+        guard presentersShouldBeActive,
+              !externalOpenTransitionOwnsWorkspace,
+              canBeginExternalOpenAction else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -883,74 +3269,26 @@ final class PhonePadAppModel: ObservableObject {
                 .localizedDescription
             return false
         }
-        guard !fileSaveInProgress else {
-            fileSaveError = PhonePadFileSaveActionError
+        fileSaveError = nil
+        fileSaveNotice = nil
+        await enqueueExternalOpenRequests([
+            PhonePadExternalOpenRequest(
+                url: selectedURL,
+                accessIntent: .inPlace
+            ),
+        ])
+        guard let commitRequestID = externalOpenCommitRequestID else {
+            fileSaveError = PhonePadExternalOpenActionError
                 .actionAlreadyInProgress
                 .localizedDescription
             return false
         }
-
-        fileSaveInProgress = true
-        fileSaveError = nil
-        fileSaveNotice = nil
-        defer { finishFileMutation() }
-
-        do {
-            try validateCommittedDocument(committedDocument)
-            try await protectCommittedDocumentForActiveTransition(
-                committedDocument
-            )
-            try validateCommittedDocument(committedDocument)
-            let documentID = DocumentID(rawValue: UUID())
-            let snapshot = try await fileAccessConnector.openTextFile(
-                at: selectedURL,
-                documentID: documentID
-            )
-            let openedState = openObservedBoundDocument(
-                state: state,
-                documentID: documentID,
-                tabID: TabID(rawValue: UUID()),
-                text: snapshot.openedFile.text,
-                observation: ObservedBoundFile(
-                    binding: snapshot.openedFile.binding,
-                    providerConflictVersions: snapshot.providerConflictVersions
-                )
-            )
-            if !openedState.tabs.contains(where: {
-                $0.document.id == documentID
-            }) {
-                let retainedDocument = openedState.activeTab.document
-                guard let retainedBinding = retainedDocument.fileBinding else {
-                    await fileAccessConnector.stopPresenting(
-                        documentID: documentID
-                    )
-                    throw PhonePadStateError.documentIsNotBound(
-                        retainedDocument.id
-                    )
-                }
-                do {
-                    try await fileAccessConnector.startPresenting(
-                        documentID: retainedDocument.id,
-                        binding: retainedBinding
-                    )
-                } catch {
-                    await fileAccessConnector.stopPresenting(
-                        documentID: documentID
-                    )
-                    throw error
-                }
-                presenterRefreshPending = true
-                await fileAccessConnector.stopPresenting(documentID: documentID)
-            }
-            state = openedState
-            presentActiveFileConflictIfNeeded()
-            fileSaveError = nil
-            fileSaveNotice = nil
-            return true
-        } catch {
-            fileSaveError = error.localizedDescription
-            return false
-        }
+        let opened = await processNextExternalOpen(
+            after: committedDocument,
+            commitRequestID: commitRequestID
+        )
+        fileSaveError = opened ? nil : externalOpenError
+        return opened
     }
 
     func prepareDocumentSaveAs(
@@ -959,7 +3297,8 @@ final class PhonePadAppModel: ObservableObject {
     ) throws -> PreparedSaveAs {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsSaveAsAction else {
+              pendingTabCloseAllowsSaveAsAction,
+              !externalOpenTransitionOwnsWorkspace else {
             throw PhonePadFileSaveActionError.actionAlreadyInProgress
         }
         guard !fileSaveCleanupRequired else {
@@ -984,7 +3323,8 @@ final class PhonePadAppModel: ObservableObject {
     ) async -> PreparedSaveAsPreflight? {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsSaveAsAction else {
+              pendingTabCloseAllowsSaveAsAction,
+              !externalOpenTransitionOwnsWorkspace else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1037,7 +3377,8 @@ final class PhonePadAppModel: ObservableObject {
     func presentFileConflictResolution() {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsFileConflictAction else {
+              pendingTabCloseAllowsFileConflictAction,
+              !externalOpenTransitionOwnsWorkspace else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1054,13 +3395,15 @@ final class PhonePadAppModel: ObservableObject {
         fileConflictResolutionIsPresented = false
         fileConflictError = nil
         restorePendingTabCloseDecisionAfterFileConflictCancellation()
+        requestExternalOpenEditorCommitIfPossible()
     }
 
     @discardableResult
     func beginSaveAsFromFileConflict() -> Bool {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsFileConflictAction else {
+              pendingTabCloseAllowsFileConflictAction,
+              !externalOpenTransitionOwnsWorkspace else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1089,7 +3432,8 @@ final class PhonePadAppModel: ObservableObject {
     func discardEditsAndReloadCurrentFile() async -> Bool {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsFileConflictAction else {
+              pendingTabCloseAllowsFileConflictAction,
+              !externalOpenTransitionOwnsWorkspace else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1161,7 +3505,8 @@ final class PhonePadAppModel: ObservableObject {
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
               !fileSaveCleanupRequired,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             presenterRefreshPending = true
             return
         }
@@ -1187,7 +3532,8 @@ final class PhonePadAppModel: ObservableObject {
                   !tabTransitionInProgress,
                   activeRecoveryAction == nil,
                   !fileSaveCleanupRequired,
-                  pendingTabCloseSession == nil else {
+                  pendingTabCloseSession == nil,
+                  !externalOpenTransitionOwnsWorkspace else {
                 presenterRefreshPending = true
                 return
             }
@@ -1219,6 +3565,9 @@ final class PhonePadAppModel: ObservableObject {
         presenterLifecycleGeneration += 1
         let generation = presenterLifecycleGeneration
         presentersShouldBeActive = false
+        if !externalOpenInProgress {
+            externalOpenCommitRequestID = nil
+        }
         if !fileSaveCleanupRequired, pendingTabCloseSession == nil {
             presenterRefreshPending = false
         }
@@ -1229,7 +3578,9 @@ final class PhonePadAppModel: ObservableObject {
         }
         guard !fileSaveInProgress,
               !tabTransitionInProgress,
-              pendingTabCloseSession == nil else {
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil,
+              !externalOpenInProgress else {
             return
         }
         _ = await retryCurrentCheckpointIfNeeded()
@@ -1239,13 +3590,37 @@ final class PhonePadAppModel: ObservableObject {
         presenterLifecycleGeneration += 1
         let generation = presenterLifecycleGeneration
         presentersShouldBeActive = true
+        didReconcileImportedCopyCleanupJournalOnActivation = false
+        await reconcileImportedCopyCleanupJournalForActiveSceneIfPossible()
+        requestExternalOpenEditorCommitIfPossible()
         await resumePresentersIfActive(generation: generation)
+    }
+
+    private func reconcileImportedCopyCleanupJournalForActiveSceneIfPossible()
+        async {
+        guard presentersShouldBeActive,
+              !didReconcileImportedCopyCleanupJournalOnActivation,
+              !externalOpenInProgress,
+              !fileSaveInProgress,
+              !externalOpenCleanupPreflightInProgress,
+              !externalOpenQueueRequiresCleanupPreflight,
+              liveExternalOpenCleanupTokens.isEmpty else {
+            return
+        }
+        didReconcileImportedCopyCleanupJournalOnActivation = true
+        externalOpenCommitRequestID = nil
+        externalOpenCleanupInProgress = true
+        _ = await reconcileImportedCopyCleanupJournal()
+        externalOpenCleanupInProgress = false
+        didReconcileImportedCopyCleanupJournalOnActivation =
+            !importedCopyCleanupJournalRetryRequired
     }
 
     func retryActiveFileReconciliation() async {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             fileConflictError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1264,7 +3639,8 @@ final class PhonePadAppModel: ObservableObject {
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
               !fileSaveCleanupRequired,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             presenterRefreshPending = true
             return
         }
@@ -1289,7 +3665,8 @@ final class PhonePadAppModel: ObservableObject {
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
               !fileSaveCleanupRequired,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             presenterRefreshPending = true
             return
         }
@@ -1300,6 +3677,7 @@ final class PhonePadAppModel: ObservableObject {
                   activeRecoveryAction == nil,
                   !fileSaveCleanupRequired,
                   pendingTabCloseSession == nil,
+                  !externalOpenTransitionOwnsWorkspace,
                   state.tabs.first(where: {
                       $0.document.id == registration.documentID
                   })?.document.fileBinding == registration.binding,
@@ -1346,7 +3724,8 @@ final class PhonePadAppModel: ObservableObject {
     ) async -> Bool {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsSaveAsAction else {
+              pendingTabCloseAllowsSaveAsAction,
+              !externalOpenTransitionOwnsWorkspace else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1431,7 +3810,8 @@ final class PhonePadAppModel: ObservableObject {
     func confirmReplacementAndCompleteSaveAs() async -> Bool {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsSaveAsAction else {
+              pendingTabCloseAllowsSaveAsAction,
+              !externalOpenTransitionOwnsWorkspace else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1523,7 +3903,8 @@ final class PhonePadAppModel: ObservableObject {
     func saveActiveDocument() async -> Bool {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsBoundSave else {
+              pendingTabCloseAllowsBoundSave,
+              !externalOpenTransitionOwnsWorkspace else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1628,7 +4009,8 @@ final class PhonePadAppModel: ObservableObject {
     func retryFileSaveCleanup() async -> Bool {
         guard !tabTransitionInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseAllowsFileSaveCleanup else {
+              pendingTabCloseAllowsFileSaveCleanup,
+              !externalOpenTransitionOwnsWorkspace else {
             fileSaveError = PhonePadFileSaveActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1711,12 +4093,33 @@ final class PhonePadAppModel: ObservableObject {
         guard !tabTransitionInProgress,
               !fileSaveInProgress,
               activeRecoveryAction == nil,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
                 .localizedDescription
             return
         }
+        await loadRecoveryItems()
+    }
+
+    func refreshInitialRecoveryItems() async {
+        guard !tabTransitionInProgress,
+              !fileSaveInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil,
+              !externalOpenInProgress,
+              pendingExternalOpenDecision == nil,
+              !externalOpenCleanupInProgress else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return
+        }
+        await loadRecoveryItems()
+    }
+
+    private func loadRecoveryItems() async {
         do {
             let storedItems = try await recoveryStore.recoveryItems()
             let openDocumentIDs = Set(state.tabs.map(\.document.id))
@@ -1737,7 +4140,8 @@ final class PhonePadAppModel: ObservableObject {
     ) async -> Bool {
         guard !tabTransitionInProgress,
               !fileSaveInProgress,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1746,6 +4150,14 @@ final class PhonePadAppModel: ObservableObject {
         guard activeRecoveryAction == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard !state.tabs.contains(where: { tab in
+            tab.document.id == documentID
+        }) else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .recoveryDocumentAlreadyOpen(documentID)
                 .localizedDescription
             return false
         }
@@ -1797,7 +4209,8 @@ final class PhonePadAppModel: ObservableObject {
     func discardRecovery(documentID: DocumentID) async -> Bool {
         guard !tabTransitionInProgress,
               !fileSaveInProgress,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -1806,6 +4219,14 @@ final class PhonePadAppModel: ObservableObject {
         guard activeRecoveryAction == nil else {
             recoveryCatalogError = PhonePadRecoveryActionError
                 .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard !state.tabs.contains(where: { tab in
+            tab.document.id == documentID
+        }) else {
+            recoveryCatalogError = PhonePadRecoveryActionError
+                .recoveryDocumentAlreadyOpen(documentID)
                 .localizedDescription
             return false
         }
@@ -2001,6 +4422,7 @@ final class PhonePadAppModel: ObservableObject {
             fileSaveNotice = "Protected edits were discarded. Protected cleanup remains and PhonePad will retry it on next recovery access."
         }
         try await advancePendingTabCloseSession()
+        _ = await retryExternalOpenCleanupIfNeeded()
     }
 
     private func resumePendingTabCloseAfterSuccessfulSave(
@@ -2172,6 +4594,7 @@ final class PhonePadAppModel: ObservableObject {
         if pendingCheckpoint == nil, failedCheckpoint == nil {
             recoveryError = nil
         }
+        refreshExternalOpenCleanupAvailability()
     }
 
     private func prepareTabTransition() -> Bool {
@@ -2180,7 +4603,8 @@ final class PhonePadAppModel: ObservableObject {
               !fileSaveCleanupRequired,
               pendingSaveAsReplacement == nil,
               activeRecoveryAction == nil,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace else {
             tabTransitionError = PhonePadTabTransitionError
                 .actionAlreadyInProgress
                 .localizedDescription
@@ -2269,7 +4693,9 @@ final class PhonePadAppModel: ObservableObject {
         guard pendingSaveAsReplacement == nil,
               activeRecoveryAction == nil,
               !activeDocumentTransitionInProgress,
-              pendingTabCloseSession == nil else {
+              pendingTabCloseSession == nil,
+              !externalOpenInProgress,
+              pendingExternalOpenDecision == nil else {
             return false
         }
         guard failedCheckpoint == nil else {
@@ -2380,6 +4806,21 @@ final class PhonePadAppModel: ObservableObject {
 
     private func finishFileMutation() {
         fileSaveInProgress = false
+        guard presentersShouldBeActive,
+              !didReconcileImportedCopyCleanupJournalOnActivation else {
+            resumePendingPresentersAfterExclusiveAction()
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            await resumePendingActivationWorkAfterExclusiveAction()
+        }
+    }
+
+    private func resumePendingActivationWorkAfterExclusiveAction() async {
+        await reconcileImportedCopyCleanupJournalForActiveSceneIfPossible()
         resumePendingPresentersAfterExclusiveAction()
     }
 
@@ -2395,12 +4836,14 @@ final class PhonePadAppModel: ObservableObject {
     }
 
     private func resumePendingPresentersAfterExclusiveAction() {
+        requestExternalOpenEditorCommitIfPossible()
         guard presentersShouldBeActive,
               !fileSaveCleanupRequired,
               !fileSaveInProgress,
               !tabTransitionInProgress,
               activeRecoveryAction == nil,
               pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace,
               presenterRefreshPending else {
             return
         }
@@ -2513,6 +4956,10 @@ final class PhonePadAppModel: ObservableObject {
                 failedCheckpoint = nil
             }
             recoveryError = nil
+            _ = await retryExternalOpenCleanupIfNeeded()
+            clearExternalOpenRecoveryProtectionFailure(
+                documentID: documentID
+            )
             return .persisted
         } catch {
             guard !Task.isCancelled, editGeneration == checkpoint.generation else {
@@ -2578,5 +5025,51 @@ private extension FileAccessConnectorError {
         default:
             return nil
         }
+    }
+}
+
+private func importedCopyCleanupFailureMessage(
+    _ failure: ImportedCopyCleanupFailure
+) -> String {
+    switch failure {
+    case .unknownToken:
+        return "Imported File cleanup authorization expired. The protected Document remains available; reopen the supplied File only if cleanup is still needed."
+    case .itemChanged:
+        return "Imported File cleanup stopped because the Inbox item changed. The protected Document remains available; review the item before retrying cleanup."
+    case let .verificationFailed(code):
+        return "Imported File cleanup could not verify the Inbox item (system code \(code)). The protected Document remains available; retry cleanup."
+    case let .fileCoordinationFailed(code):
+        return "Imported File cleanup coordination failed (system code \(code)). The protected Document remains available; retry cleanup."
+    case .fileCoordinationAccessorNotInvoked:
+        return "Imported File cleanup did not receive the coordinated Inbox item. The protected Document remains available; retry cleanup."
+    case let .deletionFailed(code):
+        return "Imported File cleanup could not remove the verified Inbox copy (system code \(code)). The protected Document remains available; retry cleanup."
+    case let .journal(error):
+        return "Imported File cleanup journal failed. \(error.localizedDescription) Retry cleanup."
+    }
+}
+
+private func externalOpenDetachmentNotice(
+    reason: FileOpenDetachmentReason
+) -> String {
+    switch reason {
+    case .copyRequired:
+        return "Opened supplied File copy as a protected unsaved Document. Use Save As to choose a durable location."
+    case .notWritable:
+        return "Opened read-only File as a protected unsaved Document. Use Save As to choose a writable location."
+    case .writabilityNotReported:
+        return "Opened File as a protected unsaved Document because its provider did not report write access. Use Save As to choose a durable location."
+    case let .writabilityInspectionFailed(code):
+        return "Opened File as a protected unsaved Document because write access could not be verified (system code \(code)). Use Save As to choose a durable location."
+    case let .bookmarkCreationFailed(code):
+        return "Opened File as a protected unsaved Document because durable access could not be created (system code \(code)). Use Save As to choose a durable location."
+    case let .bookmarkResolutionFailed(code):
+        return "Opened File as a protected unsaved Document because durable access could not be resolved (system code \(code)). Use Save As to choose a durable location."
+    case .bookmarkIsStale:
+        return "Opened File as a protected unsaved Document because its durable access reference is stale. Use Save As to choose a durable location."
+    case let .bookmarkVerificationFailed(code):
+        return "Opened File as a protected unsaved Document because durable access could not be verified (system code \(code)). Use Save As to choose a durable location."
+    case .bookmarkResolvedToDifferentFile:
+        return "Opened File as a protected unsaved Document because durable access resolved to a different File. Use Save As to choose a durable location."
     }
 }
