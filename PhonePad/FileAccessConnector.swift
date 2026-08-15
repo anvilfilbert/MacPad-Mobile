@@ -219,6 +219,7 @@ public indirect enum FileAccessConnectorError: Error, Equatable, Sendable {
     case bookmarkCreationFailed(code: Int)
     case bookmarkResolutionFailed(code: Int)
     case bookmarkRefreshFailed(code: Int)
+    case pendingBoundSaveBookmarkIsStale
     case filePresenterNotRegistered(documentID: DocumentID)
     case duplicateFilePresenterRegistration(documentID: DocumentID)
     case providerConflictVersionCountInvalid(count: Int)
@@ -321,6 +322,8 @@ extension FileAccessConnectorError: LocalizedError {
             return "Saved File access could not be resolved (system code \(code)). Locate the original File or use Save As."
         case let .bookmarkRefreshFailed(code):
             return "Updated File access could not be saved (system code \(code)). The original File was not changed."
+        case .pendingBoundSaveBookmarkIsStale:
+            return "Saved File access is stale. Locate the original File or use Save As before resolving its pending Save."
         case let .filePresenterNotRegistered(documentID):
             return "File presentation for Document \(documentID.rawValue) is not active. Return PhonePad to the foreground and try again."
         case let .duplicateFilePresenterRegistration(documentID):
@@ -1764,6 +1767,66 @@ public actor FileAccessConnector {
         )
     }
 
+    func observePendingBoundSaveDestination(
+        fileReference: RecoveryFileReference
+    ) throws -> PendingSaveDestinationObservation {
+        let resolvedBookmark: ResolvedFileBookmark
+        do {
+            resolvedBookmark = try bookmarkResolver(fileReference.bookmark)
+        } catch {
+            throw FileAccessConnectorError.bookmarkResolutionFailed(
+                code: (error as NSError).code
+            )
+        }
+        guard !resolvedBookmark.isStale else {
+            throw FileAccessConnectorError.pendingBoundSaveBookmarkIsStale
+        }
+        let url = resolvedBookmark.url
+        let didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try observePendingSaveDestination(
+            at: url,
+            fileManager: fileManager,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader
+        )
+    }
+
+    func observePendingSaveAsDestination(
+        destination: RecoverySaveAsDestination
+    ) throws -> PendingSaveDestinationObservation {
+        let resolvedDirectory = try resolveSaveAsDirectory(
+            bookmark: destination.directoryBookmark,
+            bookmarkResolver: bookmarkResolver
+        )
+        let directoryURL = resolvedDirectory.url
+        let didStartSecurityScope = directoryURL
+            .startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                directoryURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        try validateSaveAsDirectory(
+            at: directoryURL,
+            fileManager: fileManager
+        )
+        let targetURL = try makeDirectSaveAsTargetURL(
+            directoryURL: directoryURL,
+            fileName: destination.fileName
+        )
+        return try observePendingSaveDestination(
+            at: targetURL,
+            fileManager: fileManager,
+            identityReader: identityReader,
+            unresolvedVersionCountReader: unresolvedVersionCountReader
+        )
+    }
+
     public func cleanupImportedCopy(
         token: ImportedCopyCleanupToken
     ) -> ImportedCopyCleanupOutcome {
@@ -2593,6 +2656,14 @@ private final class SavedFileVerificationResultBox: @unchecked Sendable {
 
 private final class SaveAsTargetSnapshotResultBox: @unchecked Sendable {
     var result: Result<SaveAsTargetSnapshot, FileAccessConnectorError>?
+}
+
+private final class PendingSaveDestinationObservationResultBox:
+    @unchecked Sendable {
+    var result: Result<
+        PendingSaveDestinationObservation,
+        FileAccessConnectorError
+    >?
 }
 
 private final class SaveAsCommitResultBox: @unchecked Sendable {
@@ -3787,6 +3858,88 @@ private func coordinatedReadSaveAsTargetSnapshot(
         }
     }
 
+    if let result = resultBox.result {
+        return try result.get()
+    }
+    if let coordinationError {
+        throw FileAccessConnectorError.fileCoordinationFailed(
+            code: coordinationError.code
+        )
+    }
+    throw FileAccessConnectorError.fileCoordinationAccessorNotInvoked
+}
+
+private func observePendingSaveDestination(
+    at url: URL,
+    fileManager: FileManager,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader:
+        FileAccessConnector.UnresolvedVersionCountReader
+) throws -> PendingSaveDestinationObservation {
+    switch try inspectNode(at: url, fileManager: fileManager) {
+    case .missing:
+        return .missing
+    case .directory:
+        return .nonRegular(.directory)
+    case let .existing(kind):
+        guard kind == .regularFile else {
+            return .nonRegular(kind)
+        }
+    }
+    return try coordinatedReadPendingSaveDestinationObservation(
+        at: url,
+        fileManager: fileManager,
+        identityReader: identityReader,
+        unresolvedVersionCountReader: unresolvedVersionCountReader
+    )
+}
+
+private func coordinatedReadPendingSaveDestinationObservation(
+    at url: URL,
+    fileManager: FileManager,
+    identityReader: FileAccessConnector.FileIdentityReader,
+    unresolvedVersionCountReader:
+        FileAccessConnector.UnresolvedVersionCountReader
+) throws -> PendingSaveDestinationObservation {
+    let resultBox = PendingSaveDestinationObservationResultBox()
+    var coordinationError: NSError?
+    let fileCoordinator = NSFileCoordinator(filePresenter: nil)
+    fileCoordinator.coordinate(
+        readingItemAt: url,
+        options: .withoutChanges,
+        error: &coordinationError
+    ) { coordinatedURL in
+        resultBox.result = Result {
+            do {
+                let snapshot = try readSaveAsTargetSnapshot(
+                    at: coordinatedURL,
+                    fileManager: fileManager,
+                    identityReader: identityReader
+                )
+                return .available(
+                    identity: snapshot.identity,
+                    digest: snapshot.digest,
+                    providerConflictVersions:
+                        try makeProviderConflictVersions(
+                            unresolvedCount:
+                                unresolvedVersionCountReader(coordinatedURL)
+                        )
+                )
+            } catch FileAccessConnectorError.saveAsTargetChanged {
+                return .missing
+            } catch let FileAccessConnectorError.targetAlreadyExists(kind) {
+                return .nonRegular(kind)
+            }
+        }
+        .mapError { error in
+            if let connectorError = error as? FileAccessConnectorError {
+                return connectorError
+            }
+            return .unexpectedFileSystemFailure(
+                code: (error as NSError).code
+            )
+        }
+    }
     if let result = resultBox.result {
         return try result.get()
     }
