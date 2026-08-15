@@ -142,6 +142,7 @@ public enum DetachedDocumentOpenPreparation: Equatable, Sendable {
 
 public enum RecoveredFileOpenError: Error, Equatable, Sendable {
     case fileReferenceMissing(DocumentID)
+    case documentAlreadyBound(DocumentID)
 }
 
 extension RecoveredFileOpenError: LocalizedError {
@@ -149,8 +150,120 @@ extension RecoveredFileOpenError: LocalizedError {
         switch self {
         case let .fileReferenceMissing(documentID):
             return "Recovered Document \(documentID.rawValue.uuidString) has no durable original File reference. Open its edits detached and use Save As."
+        case let .documentAlreadyBound(documentID):
+            return "Recovered Document \(documentID.rawValue.uuidString) is already attached to a File. Resolve its File Conflict or use Save As."
         }
     }
+}
+
+public struct PreparedRecoveredDocumentReattachment: Equatable, Sendable {
+    public let expectedState: PhonePadState
+    public let transition: RecoveryEditTransition
+    public let documentID: DocumentID
+
+    init(
+        expectedState: PhonePadState,
+        transition: RecoveryEditTransition,
+        documentID: DocumentID
+    ) {
+        self.expectedState = expectedState
+        self.transition = transition
+        self.documentID = documentID
+    }
+}
+
+public func prepareRecoveredDocumentReattachment(
+    state: PhonePadState,
+    documentID: DocumentID,
+    observation: ObservedBoundFile,
+    editedAt: Date
+) throws -> PreparedRecoveredDocumentReattachment {
+    guard let tabIndex = state.tabs.firstIndex(where: { tab in
+        tab.document.id == documentID
+    }) else {
+        throw PhonePadStateError.documentMissing(documentID)
+    }
+    let tab = state.tabs[tabIndex]
+    guard tab.document.fileBinding == nil else {
+        throw RecoveredFileOpenError.documentAlreadyBound(documentID)
+    }
+    guard let fileReference = tab.document.recoveryFileReference else {
+        throw RecoveredFileOpenError.fileReferenceMissing(documentID)
+    }
+    try requireFileBindingAvailableToDocument(
+        state: state,
+        documentID: documentID,
+        candidate: observation.binding
+    )
+    let baseline = recoveryBaselineBinding(
+        fileReference: fileReference,
+        observation: observation
+    )
+    let reconciliation = reconcileFileBinding(
+        baseline: baseline,
+        observation: observation
+    )
+    let retainedBinding: FileBinding
+    let conflict: FileConflict?
+    switch reconciliation {
+    case let .continuous(updatedBinding):
+        retainedBinding = updatedBinding
+        conflict = nil
+    case let .conflicted(binding, fileConflict):
+        retainedBinding = binding
+        conflict = fileConflict
+    }
+    let reattachedDocument = PhonePadDocument(
+        id: tab.document.id,
+        title: tab.document.title,
+        text: tab.document.text,
+        fileBinding: retainedBinding,
+        recoveryFileReference: makeRecoveryFileReference(
+            fileBinding: retainedBinding
+        ),
+        fileConflict: conflict,
+        isUnsaved: true,
+        recoveryState: .checkpointPending
+    )
+    var tabs = state.tabs
+    tabs[tabIndex] = PhonePadTab(
+        id: tab.id,
+        document: reattachedDocument,
+        displaySettings: tab.displaySettings
+    )
+    let reattachedState = PhonePadState(
+        tabs: tabs,
+        activeTabID: tab.id
+    )
+    let envelope = try RecoveryEnvelope(
+        formatVersion: RecoveryEnvelope.currentFormatVersion,
+        documentID: documentID,
+        title: reattachedDocument.title,
+        text: reattachedDocument.text,
+        editedAt: editedAt,
+        fileReference: reattachedDocument.recoveryFileReference,
+        pendingSave: nil
+    )
+    return PreparedRecoveredDocumentReattachment(
+        expectedState: state,
+        transition: RecoveryEditTransition(
+            state: reattachedState,
+            envelope: envelope
+        ),
+        documentID: documentID
+    )
+}
+
+public func commitPreparedRecoveredDocumentReattachment(
+    state: PhonePadState,
+    prepared: PreparedRecoveredDocumentReattachment
+) throws -> RecoveryEditTransition {
+    guard state == prepared.expectedState else {
+        throw PhonePadStateError.workspaceChangedSinceFileOpenPreparation(
+            prepared.documentID
+        )
+    }
+    return prepared.transition
 }
 
 public func prepareBoundDocumentOpen(

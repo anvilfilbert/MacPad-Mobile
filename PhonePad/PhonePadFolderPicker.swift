@@ -15,11 +15,14 @@ enum PhonePadFolderPickerError: Error, LocalizedError {
 
 enum PhonePadFilePickerError: Error, LocalizedError {
     case invalidSelectionCount(Int)
+    case selectionActionMissing
 
     var errorDescription: String? {
         switch self {
         case let .invalidSelectionCount(count):
             return "Files returned \(count) items. Select exactly one text File and retry."
+        case .selectionActionMissing:
+            return "Selected File has no pending Open or Locate Original action. Close the picker and choose the File action again."
         }
     }
 }

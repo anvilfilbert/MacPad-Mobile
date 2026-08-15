@@ -26,14 +26,17 @@ private enum PhonePadSaveAsPresentationOrigin: Equatable {
     case tabClose(DocumentID)
 }
 
-private enum PhonePadFileAction {
+private enum PhonePadFileAction: Equatable {
     case open
+    case locateOriginal
     case save
 
     var errorIdentifier: String {
         switch self {
         case .open:
             return "phonepad.open.error"
+        case .locateOriginal:
+            return "phonepad.locate-original.error"
         case .save:
             return "phonepad.save.error"
         }
@@ -43,6 +46,8 @@ private enum PhonePadFileAction {
         switch self {
         case .open:
             return "phonepad.open.progress"
+        case .locateOriginal:
+            return "phonepad.locate-original.progress"
         case .save:
             return "phonepad.save.progress"
         }
@@ -52,6 +57,8 @@ private enum PhonePadFileAction {
         switch self {
         case .open:
             return "Opening File"
+        case .locateOriginal:
+            return "Locating Original File"
         case .save:
             return "Saving File"
         }
@@ -619,6 +626,17 @@ struct PhonePadRootView: View {
                 Label("Save As", systemImage: "doc.badge.plus")
             }
             .accessibilityIdentifier("phonepad.action-menu.save-as")
+
+            if model.activeDocumentCanLocateOriginal {
+                Button {
+                    presentLocateOriginalFilePicker()
+                } label: {
+                    Label("Locate Original", systemImage: "scope")
+                }
+                .accessibilityIdentifier(
+                    "phonepad.action-menu.locate-original"
+                )
+            }
 
             Button {
                 recoveryIsPresented = true
@@ -1602,8 +1620,45 @@ struct PhonePadRootView: View {
         filePickerIsPresented = true
     }
 
+    private func presentLocateOriginalFilePicker() {
+        model.clearFileSaveFeedback()
+        fileAction = .locateOriginal
+        filePickerIsPresented = true
+    }
+
     private func selectOpenFile(_ selectedURL: URL) {
         filePickerIsPresented = false
+        guard let selectedAction = fileAction else {
+            model.reportFileSaveTransitionError(
+                PhonePadFilePickerError.selectionActionMissing
+            )
+            return
+        }
+        switch selectedAction {
+        case .locateOriginal:
+            let committedDocument: CommittedEditorDocument
+            do {
+                committedDocument = try editorTransitionController
+                    .commitMarkedText()
+            } catch {
+                model.reportFileSaveTransitionError(error)
+                return
+            }
+            Task { @MainActor in
+                _ = await model.locateOriginal(
+                    selectedURL: selectedURL,
+                    after: committedDocument
+                )
+            }
+            return
+        case .open:
+            break
+        case .save:
+            model.reportFileSaveTransitionError(
+                PhonePadFilePickerError.selectionActionMissing
+            )
+            return
+        }
         fileAction = nil
         Task { @MainActor in
             await model.enqueueExternalOpenRequests([
@@ -1623,7 +1678,9 @@ struct PhonePadRootView: View {
 
     private func failFilePicker(_ error: Error) {
         filePickerIsPresented = false
-        fileAction = .open
+        if fileAction == nil {
+            fileAction = .open
+        }
         model.reportFileSaveTransitionError(error)
     }
 

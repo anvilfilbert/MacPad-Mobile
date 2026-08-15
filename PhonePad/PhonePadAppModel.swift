@@ -585,6 +585,13 @@ final class PhonePadAppModel: ObservableObject {
         terminalExternalOpenErrorPendingDismissal
     }
 
+    var activeDocumentCanLocateOriginal: Bool {
+        let document = state.activeTab.document
+        return document.fileBinding == nil
+            && document.recoveryFileReference != nil
+            && document.isUnsaved
+    }
+
     var recoveryUnavailableNotice: RecoveryUnavailableNotice? {
         guard let checkpoint = failedCheckpoint,
               state.activeTab.document.id
@@ -3338,6 +3345,74 @@ final class PhonePadAppModel: ObservableObject {
     func reportFileSaveTransitionError(_ error: Error) {
         fileSaveError = error.localizedDescription
         fileSaveNotice = nil
+    }
+
+    @discardableResult
+    func locateOriginal(
+        selectedURL: URL,
+        after committedDocument: CommittedEditorDocument
+    ) async -> Bool {
+        guard !tabTransitionInProgress,
+              activeRecoveryAction == nil,
+              pendingTabCloseSession == nil,
+              !externalOpenTransitionOwnsWorkspace,
+              !fileSaveInProgress else {
+            fileSaveError = PhonePadFileSaveActionError
+                .actionAlreadyInProgress
+                .localizedDescription
+            return false
+        }
+        guard !fileSaveCleanupRequired else {
+            fileSaveError = PhonePadFileSaveActionError
+                .cleanupRequired
+                .localizedDescription
+            return false
+        }
+        guard activeDocumentCanLocateOriginal else {
+            fileSaveError = RecoveredFileOpenError
+                .fileReferenceMissing(state.activeTab.document.id)
+                .localizedDescription
+            return false
+        }
+
+        fileSaveInProgress = true
+        fileSaveError = nil
+        fileSaveNotice = nil
+        let documentID = state.activeTab.document.id
+        defer { finishFileMutation() }
+
+        do {
+            try validateCommittedDocument(committedDocument)
+            try await protectCommittedDocumentForActiveTransition(
+                committedDocument
+            )
+            try validateCommittedDocument(committedDocument)
+            let result = try await reattachRecoveredDocument(
+                state: state,
+                documentID: documentID,
+                selectedURL: selectedURL,
+                editedAt: Date(),
+                recoveryStore: recoveryStore,
+                fileAccessConnector: fileAccessConnector
+            )
+            switch result {
+            case let .reattached(reattachedState):
+                state = reattachedState
+                fileSaveNotice = reattachedState.activeTab.document.fileConflict
+                    == nil
+                    ? "Original File located. Recovered edits remain protected and can now be saved in place."
+                    : nil
+            case let .activatedExisting(activatedState):
+                state = activatedState
+                fileSaveNotice = "Original File is already open. Its existing Tab was activated; recovered text remains protected and detached for Save As."
+            }
+            recoveryError = nil
+            fileSaveError = nil
+            return true
+        } catch {
+            fileSaveError = error.localizedDescription
+            return false
+        }
     }
 
     @discardableResult
