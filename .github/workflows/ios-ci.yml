@@ -48,7 +48,7 @@ jobs:
           -quiet
           -project PhonePad.xcodeproj
           -scheme PhonePad
-          -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest'
+          -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest'
           -resultBundlePath '${{ runner.temp }}/PhonePadTests.xcresult'
           test
           -only-testing:PhonePadTests
