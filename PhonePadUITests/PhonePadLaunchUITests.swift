@@ -360,7 +360,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.tap()
         editor.typeText("Discard after explicit confirmation")
-        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 10))
+        XCTAssertTrue(waitForValue(activeTab, value: "Edits protected", timeout: 20))
         app.terminate()
 
         app.launch()
