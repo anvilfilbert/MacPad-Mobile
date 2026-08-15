@@ -65,6 +65,7 @@
 		C00000000000000000000039 /* PhonePadExternalOpenWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000003F /* PhonePadExternalOpenWorkflowTests.swift */; };
 		C0000000000000000000003A /* ImportedCopyCleanupJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */; };
 		C0000000000000000000003B /* ImportedCopyCleanupJournalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */; };
+		C0000000000000000000003C /* PhonePadEditorFindController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000048 /* PhonePadEditorFindController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -184,6 +185,7 @@
 		B0000000000000000000003F /* PhonePadExternalOpenWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadExternalOpenWorkflowTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedCopyCleanupJournal.swift; sourceTree = "<group>"; };
 		B00000000000000000000047 /* ImportedCopyCleanupJournalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportedCopyCleanupJournalTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000048 /* PhonePadEditorFindController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePadEditorFindController.swift; sourceTree = "<group>"; };
 		B00000000000000000000041 /* PhonePad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhonePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000042 /* PhonePadCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PhonePadCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000043 /* PhonePadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhonePadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -278,6 +280,7 @@
 			children = (
 				B00000000000000000000012 /* FileAccessConnector.swift */,
 				B00000000000000000000046 /* ImportedCopyCleanupJournal.swift */,
+				B00000000000000000000048 /* PhonePadEditorFindController.swift */,
 				B0000000000000000000002A /* PresentedFile.swift */,
 				B00000000000000000000018 /* PhonePadBoundFileWorkflow.swift */,
 				B0000000000000000000002B /* PhonePadFileConflictWorkflow.swift */,
@@ -563,6 +566,7 @@
 			files = (
 				C00000000000000000000012 /* FileAccessConnector.swift in Sources */,
 				C0000000000000000000003A /* ImportedCopyCleanupJournal.swift in Sources */,
+				C0000000000000000000003C /* PhonePadEditorFindController.swift in Sources */,
 				C00000000000000000000024 /* PresentedFile.swift in Sources */,
 				C00000000000000000000018 /* PhonePadBoundFileWorkflow.swift in Sources */,
 				C00000000000000000000025 /* PhonePadFileConflictWorkflow.swift in Sources */,
