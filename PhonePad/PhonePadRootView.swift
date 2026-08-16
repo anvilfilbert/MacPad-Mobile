@@ -2036,13 +2036,13 @@ struct PhonePadRootView: View {
     private func fileConflictDescription(_ conflict: FileConflict) -> String {
         switch conflict {
         case .contentChanged:
-            return "Original File content changed outside PhonePad. Current edits were not overwritten."
+            return "Original File content changed outside MacPad Mobile. Current edits were not overwritten."
         case .stableIdentityChanged:
-            return "Original File identity changed outside PhonePad. Current edits were not overwritten."
+            return "Original File identity changed outside MacPad Mobile. Current edits were not overwritten."
         case .ambiguousLocatorChange:
             return "Original File moved without a stable provider identity. Current edits were not overwritten."
         case let .unresolvedProviderVersions(count):
-            return "Original File has \(count) unresolved provider conflict version(s). PhonePad will not resolve them; use Files or the provider before saving to this File."
+            return "Original File has \(count) unresolved provider conflict version(s). MacPad Mobile will not resolve them; use Files or the provider before saving to this File."
         }
     }
 }

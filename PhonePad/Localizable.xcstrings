@@ -461,22 +461,22 @@
         }
       }
     },
-    "PhonePad": {
+    "MacPad Mobile": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "PhonePad"
+            "value": "MacPad Mobile"
           }
         }
       }
     },
-    "PhonePad does not collect usage, document, pasteboard, or print data.": {
+    "MacPad Mobile does not collect usage, document, pasteboard, or print data.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "PhonePad does not collect usage, document, pasteboard, or print data."
+            "value": "MacPad Mobile does not collect usage, document, pasteboard, or print data."
           }
         }
       }

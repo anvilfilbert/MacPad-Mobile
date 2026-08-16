@@ -107,9 +107,26 @@ enum ImportedCopyCleanupJournalItemKind: Equatable, Sendable {
     case journalFile
 }
 
+typealias ImportedCopyCleanupMetadataVerifier = @Sendable (
+    URL,
+    ImportedCopyCleanupJournalItemKind,
+    FileManager
+) throws -> Void
+
 enum ImportedCopyCleanupAuthorizationPhase: String, Codable, Sendable {
     case awaitingProtection
     case cleanupAuthorized
+}
+
+struct ImportedCopyCleanupFingerprint: Codable, Equatable, Sendable {
+    let deviceID: Int64
+    let inode: UInt64
+    let generation: UInt32
+    let byteCount: Int64
+    let modificationTimeSeconds: Int64
+    let modificationTimeNanoseconds: Int64
+    let statusChangeTimeSeconds: Int64
+    let statusChangeTimeNanoseconds: Int64
 }
 
 struct ImportedCopyCleanupRecord: Sendable {
@@ -117,15 +134,7 @@ struct ImportedCopyCleanupRecord: Sendable {
     let childName: ValidatedFileName
     let url: URL
     let inboxURL: URL
-    let deviceID: dev_t
-    let inode: ino_t
-    let generation: UInt32
-    let byteCount: Int64
-    let modificationTimeSeconds: Int64
-    let modificationTimeNanoseconds: Int64
-    let statusChangeTimeSeconds: Int64
-    let statusChangeTimeNanoseconds: Int64
-    let digest: FileDigest?
+    let fingerprint: ImportedCopyCleanupFingerprint
     let phase: ImportedCopyCleanupAuthorizationPhase
 }
 
@@ -138,16 +147,101 @@ private struct ImportedCopyCleanupJournalEntry: Codable, Equatable, Sendable {
     let token: UUID
     let documentID: DocumentID
     let childName: ValidatedFileName
-    let deviceID: Int64
-    let inode: UInt64
-    let generation: UInt32
-    let byteCount: Int64
-    let modificationTimeSeconds: Int64
-    let modificationTimeNanoseconds: Int64
-    let statusChangeTimeSeconds: Int64
-    let statusChangeTimeNanoseconds: Int64
-    let digest: FileDigest?
+    let fingerprint: ImportedCopyCleanupFingerprint
     let phase: ImportedCopyCleanupAuthorizationPhase
+
+    private enum CodingKeys: String, CodingKey {
+        case token
+        case documentID
+        case childName
+        case deviceID
+        case inode
+        case generation
+        case byteCount
+        case modificationTimeSeconds
+        case modificationTimeNanoseconds
+        case statusChangeTimeSeconds
+        case statusChangeTimeNanoseconds
+        case phase
+    }
+
+    init(
+        token: UUID,
+        documentID: DocumentID,
+        childName: ValidatedFileName,
+        fingerprint: ImportedCopyCleanupFingerprint,
+        phase: ImportedCopyCleanupAuthorizationPhase
+    ) {
+        self.token = token
+        self.documentID = documentID
+        self.childName = childName
+        self.fingerprint = fingerprint
+        self.phase = phase
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        token = try values.decode(UUID.self, forKey: .token)
+        documentID = try values.decode(DocumentID.self, forKey: .documentID)
+        childName = try values.decode(
+            ValidatedFileName.self,
+            forKey: .childName
+        )
+        fingerprint = ImportedCopyCleanupFingerprint(
+            deviceID: try values.decode(Int64.self, forKey: .deviceID),
+            inode: try values.decode(UInt64.self, forKey: .inode),
+            generation: try values.decode(UInt32.self, forKey: .generation),
+            byteCount: try values.decode(Int64.self, forKey: .byteCount),
+            modificationTimeSeconds: try values.decode(
+                Int64.self,
+                forKey: .modificationTimeSeconds
+            ),
+            modificationTimeNanoseconds: try values.decode(
+                Int64.self,
+                forKey: .modificationTimeNanoseconds
+            ),
+            statusChangeTimeSeconds: try values.decode(
+                Int64.self,
+                forKey: .statusChangeTimeSeconds
+            ),
+            statusChangeTimeNanoseconds: try values.decode(
+                Int64.self,
+                forKey: .statusChangeTimeNanoseconds
+            )
+        )
+        phase = try values.decode(
+            ImportedCopyCleanupAuthorizationPhase.self,
+            forKey: .phase
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(token, forKey: .token)
+        try values.encode(documentID, forKey: .documentID)
+        try values.encode(childName, forKey: .childName)
+        try values.encode(fingerprint.deviceID, forKey: .deviceID)
+        try values.encode(fingerprint.inode, forKey: .inode)
+        try values.encode(fingerprint.generation, forKey: .generation)
+        try values.encode(fingerprint.byteCount, forKey: .byteCount)
+        try values.encode(
+            fingerprint.modificationTimeSeconds,
+            forKey: .modificationTimeSeconds
+        )
+        try values.encode(
+            fingerprint.modificationTimeNanoseconds,
+            forKey: .modificationTimeNanoseconds
+        )
+        try values.encode(
+            fingerprint.statusChangeTimeSeconds,
+            forKey: .statusChangeTimeSeconds
+        )
+        try values.encode(
+            fingerprint.statusChangeTimeNanoseconds,
+            forKey: .statusChangeTimeNanoseconds
+        )
+        try values.encode(phase, forKey: .phase)
+    }
 }
 
 private let importedCopyCleanupJournalFormatVersion: UInt = 1
@@ -259,8 +353,7 @@ func readImportedCopyCleanupRecords(
     rootURL: URL,
     inboxURL: URL?,
     fileManager: FileManager,
-    metadataVerifier: FileAccessConnector
-        .ImportedCopyCleanupJournalMetadataVerifier
+    metadataVerifier: ImportedCopyCleanupMetadataVerifier
 ) throws -> [ImportedCopyCleanupToken: ImportedCopyCleanupRecord] {
     try prepareImportedCopyCleanupJournalDirectory(
         rootURL: rootURL,
@@ -331,8 +424,7 @@ func persistImportedCopyCleanupRecords(
     _ records: [ImportedCopyCleanupToken: ImportedCopyCleanupRecord],
     rootURL: URL,
     fileManager: FileManager,
-    metadataVerifier: FileAccessConnector
-        .ImportedCopyCleanupJournalMetadataVerifier
+    metadataVerifier: ImportedCopyCleanupMetadataVerifier
 ) throws {
     try prepareImportedCopyCleanupJournalDirectory(
         rootURL: rootURL,
@@ -357,15 +449,7 @@ func persistImportedCopyCleanupRecords(
             token: token.rawValue,
             documentID: record.documentID,
             childName: record.childName,
-            deviceID: Int64(record.deviceID),
-            inode: UInt64(record.inode),
-            generation: record.generation,
-            byteCount: record.byteCount,
-            modificationTimeSeconds: record.modificationTimeSeconds,
-            modificationTimeNanoseconds: record.modificationTimeNanoseconds,
-            statusChangeTimeSeconds: record.statusChangeTimeSeconds,
-            statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds,
-            digest: record.digest,
+            fingerprint: record.fingerprint,
             phase: record.phase
         )
     }
@@ -434,8 +518,7 @@ private func journalItemKind(mode: mode_t) -> ImportedCopyCleanupJournalNodeKind
 private func prepareImportedCopyCleanupJournalDirectory(
     rootURL: URL,
     fileManager: FileManager,
-    metadataVerifier: FileAccessConnector
-        .ImportedCopyCleanupJournalMetadataVerifier
+    metadataVerifier: ImportedCopyCleanupMetadataVerifier
 ) throws {
     do {
         try fileManager.createDirectory(
@@ -466,8 +549,8 @@ private func importedCopyCleanupRecords(
     for entry in entries {
         let token = ImportedCopyCleanupToken(rawValue: entry.token)
         guard records[token] == nil,
-              let deviceID = dev_t(exactly: entry.deviceID),
-              let inode = ino_t(exactly: entry.inode) else {
+              dev_t(exactly: entry.fingerprint.deviceID) != nil,
+              ino_t(exactly: entry.fingerprint.inode) != nil else {
             throw ImportedCopyCleanupJournalError.invalidEntry
         }
         let url = canonicalInboxURL.appendingPathComponent(
@@ -484,15 +567,7 @@ private func importedCopyCleanupRecords(
             childName: entry.childName,
             url: url,
             inboxURL: canonicalInboxURL,
-            deviceID: deviceID,
-            inode: inode,
-            generation: entry.generation,
-            byteCount: entry.byteCount,
-            modificationTimeSeconds: entry.modificationTimeSeconds,
-            modificationTimeNanoseconds: entry.modificationTimeNanoseconds,
-            statusChangeTimeSeconds: entry.statusChangeTimeSeconds,
-            statusChangeTimeNanoseconds: entry.statusChangeTimeNanoseconds,
-            digest: entry.digest,
+            fingerprint: entry.fingerprint,
             phase: entry.phase
         )
     }
@@ -502,8 +577,7 @@ private func importedCopyCleanupRecords(
 private func removeImportedCopyCleanupJournalIfPresent(
     journalURL: URL,
     fileManager: FileManager,
-    metadataVerifier: FileAccessConnector
-        .ImportedCopyCleanupJournalMetadataVerifier
+    metadataVerifier: ImportedCopyCleanupMetadataVerifier
 ) throws {
     var status = stat()
     let statusResult = lstat(

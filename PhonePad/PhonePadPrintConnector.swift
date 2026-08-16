@@ -18,7 +18,7 @@ enum PhonePadPrintError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .presentationRejected:
-            return "Print could not open. Keep PhonePad visible and try again."
+            return "Print could not open. Keep MacPad Mobile visible and try again."
         case let .interactionFailed(domain, code):
             return "Print failed in the system print service (\(domain), code \(code)). Check the printer and try again."
         }

@@ -14,7 +14,7 @@ struct RecoveryUnavailableNotice: Equatable, Sendable {
             return "Recovery Unavailable. Current in-memory text is not protected, and no verified checkpoint exists yet."
         }
         if hasLastVerifiedCheckpoint {
-            return "Recovery Unavailable. Current text matches the last verified checkpoint, but PhonePad could not refresh its protection."
+            return "Recovery Unavailable. Current text matches the last verified checkpoint, but MacPad Mobile could not refresh its protection."
         }
         return "Recovery Unavailable. Current text has no verified checkpoint."
     }

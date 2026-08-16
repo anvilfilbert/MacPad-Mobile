@@ -48,7 +48,7 @@ extension ExternalOpenRecoveryWorkflowError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case let .recoveryCleanupFailed(_, failure):
-            return "Preserved edits could not be discarded before File Open: \(failure.userFacingDescription) Current Tabs and recovery remain unchanged. Retry Open so PhonePad can read and prepare the File again."
+            return "Preserved edits could not be discarded before File Open: \(failure.userFacingDescription) Current Tabs and recovery remain unchanged. Retry Open so MacPad Mobile can read and prepare the File again."
         }
     }
 }

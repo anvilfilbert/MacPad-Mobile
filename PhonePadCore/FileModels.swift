@@ -182,7 +182,7 @@ extension NewTextFileEncodingError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case let .contentTooLarge(actualByteCount, maximumByteCount):
-            return "Encoded File is \(actualByteCount) bytes; PhonePad supports at most \(maximumByteCount) bytes. Shorten the Document before saving."
+            return "Encoded File is \(actualByteCount) bytes; MacPad Mobile supports at most \(maximumByteCount) bytes. Shorten the Document before saving."
         }
     }
 }
