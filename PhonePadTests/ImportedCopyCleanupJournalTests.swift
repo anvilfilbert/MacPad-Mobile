@@ -242,6 +242,9 @@ final class ImportedCopyCleanupJournalTests: XCTestCase {
         XCTAssertFalse(journalText.contains(inboxURL.path))
         XCTAssertFalse(journalText.contains(fileURL.path))
         XCTAssertFalse(journalText.contains(privateText))
+        XCTAssertTrue(journalText.contains("\"deviceID\""))
+        XCTAssertFalse(journalText.contains("\"fingerprint\""))
+        XCTAssertFalse(journalText.contains("\"digest\""))
         XCTAssertLessThan(journalData.count, 4_096)
     }
 

@@ -90,7 +90,7 @@ public enum FileRecoveryStoreError: Error, LocalizedError, Sendable {
         case let .checkpointDocumentMismatch(expected, actual, _):
             "Recovery data contains document \(actual.rawValue), expected \(expected.rawValue). Keep it until you choose Discard Recovery."
         case let .unsupportedCheckpointVersion(documentID, expected, actual, _):
-            "Recovery data for document \(documentID.rawValue) uses version \(actual), expected \(expected). Keep it until PhonePad can read it or you choose Discard Recovery."
+            "Recovery data for document \(documentID.rawValue) uses version \(actual), expected \(expected). Keep it until MacPad Mobile can read it or you choose Discard Recovery."
         case let .backupExclusionVerificationFailed(documentID, _):
             recoveryMessage(
                 documentID: documentID,

@@ -43,7 +43,7 @@ extension TextFileDecodingError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case let .contentTooLarge(actualByteCount, maximumByteCount):
-            return "Selected File is \(actualByteCount) bytes; PhonePad supports at most \(maximumByteCount) bytes. Choose a smaller plain-text File."
+            return "Selected File is \(actualByteCount) bytes; MacPad Mobile supports at most \(maximumByteCount) bytes. Choose a smaller plain-text File."
         case let .unsupportedContent(kind):
             return "Selected File has a recognized unsupported \(kind.description). Choose a plain-text File."
         case .unsupportedEncoding:
@@ -74,11 +74,11 @@ extension TextFileEncodingError: LocalizedError {
         case let .unrepresentable(encoding):
             return "Document cannot be represented losslessly as \(encoding.description). Choose another encoding or remove unsupported characters."
         case let .contentTooLarge(encoding, actualByteCount, maximumByteCount):
-            return "Document requires \(actualByteCount) bytes as \(encoding.description); PhonePad supports at most \(maximumByteCount) bytes. Shorten the Document or choose a smaller encoding."
+            return "Document requires \(actualByteCount) bytes as \(encoding.description); MacPad Mobile supports at most \(maximumByteCount) bytes. Shorten the Document or choose a smaller encoding."
         case let .unsupportedContent(kind):
             return "Encoded Document would be recognized as unsupported \(kind.description) instead of plain text. Change its leading content or choose another encoding."
         case .containsNullScalar:
-            return "Document contains a null character, which PhonePad does not save as plain text. Remove it before saving."
+            return "Document contains a null character, which MacPad Mobile does not save as plain text. Remove it before saving."
         case let .binaryLike(controlScalarCount, totalScalarCount):
             return "Document contains \(controlScalarCount) disallowed control characters among \(totalScalarCount) characters and cannot be saved as plain text."
         }
@@ -101,11 +101,11 @@ extension EditableDocumentTextError: LocalizedError {
         case let .unsupportedContent(kind):
             return "Document begins with recognized unsupported \(kind.description) content. Change it before editing as plain text."
         case .containsNullScalar:
-            return "Document contains a null character, which PhonePad does not edit as plain text. Remove it before continuing."
+            return "Document contains a null character, which MacPad Mobile does not edit as plain text. Remove it before continuing."
         case let .binaryLike(controlScalarCount, totalScalarCount):
             return "Document contains \(controlScalarCount) disallowed control characters among \(totalScalarCount) characters and is not accepted as plain text."
         case let .contentTooLarge(minimumSupportedByteCount, maximumByteCount):
-            return "Document requires at least \(minimumSupportedByteCount) bytes in a supported encoding; PhonePad supports at most \(maximumByteCount) bytes. Shorten it before continuing."
+            return "Document requires at least \(minimumSupportedByteCount) bytes in a supported encoding; MacPad Mobile supports at most \(maximumByteCount) bytes. Shorten it before continuing."
         }
     }
 }

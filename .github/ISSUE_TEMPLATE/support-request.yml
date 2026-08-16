@@ -1,0 +1,45 @@
+name: Support request
+description: Ask a public, non-security question about MacPad Mobile.
+title: "Support: "
+labels:
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Support requests are public. Do not include Document content, credentials, private paths, personal information, or vulnerability details.
+  - type: textarea
+    id: question
+    attributes:
+      label: How can we help?
+      description: Describe the task or problem using invented names and redacted sample content.
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: iPhone or iPad model
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: iOS or iPadOS version
+      placeholder: 18.x
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: File provider or sending app
+      description: Include this only when it is relevant.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Public-data check
+      options:
+        - label: I removed Document content, credentials, private paths, and personal information.
+          required: true
+        - label: This request does not describe a security vulnerability.
+          required: true

@@ -5,6 +5,14 @@ import PhonePadCore
 
 @MainActor
 final class PhonePadAppModelTests: XCTestCase {
+    func testApplicationUsesMacPadMobileDisplayName() {
+        XCTAssertEqual(
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName")
+                as? String,
+            "MacPad Mobile"
+        )
+    }
+
     func testBoundEditRejectsTextWithoutAnySupportedFileRepresentation() async throws {
         let recoveryRootURL = try makeModelRecoveryRoot()
         let sourceRootURL = try makeModelRecoveryRoot()

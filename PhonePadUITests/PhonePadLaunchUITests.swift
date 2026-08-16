@@ -263,7 +263,7 @@ final class PhonePadLaunchUITests: XCTestCase {
         let cancel = app.buttons["phonepad.file-conflict.cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 2))
         cancel.tap()
-        XCTAssertFalse(conflictSheet.exists)
+        XCTAssertTrue(conflictSheet.waitForNonExistence(timeout: 5))
 
         let tabs = tabItems(in: app)
         XCTAssertEqual(tabs.count, 1)

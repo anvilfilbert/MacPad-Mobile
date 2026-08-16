@@ -92,8 +92,8 @@ struct PhonePadPrivacySheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("PhonePad") {
-                    Text("PhonePad does not collect usage, document, pasteboard, or print data.")
+                Section("MacPad Mobile") {
+                    Text("MacPad Mobile does not collect usage, document, pasteboard, or print data.")
                 }
 
                 Section("Pasteboard") {

@@ -63,14 +63,7 @@ public struct ImportedCopyCleanupToken: Equatable, Hashable, Sendable {
 
 struct ImportedCopyCleanupCandidate: Equatable, Sendable {
     let childName: ValidatedFileName
-    let deviceID: Int64
-    let inode: UInt64
-    let generation: UInt32
-    let byteCount: Int64
-    let modificationTimeSeconds: Int64
-    let modificationTimeNanoseconds: Int64
-    let statusChangeTimeSeconds: Int64
-    let statusChangeTimeNanoseconds: Int64
+    let fingerprint: ImportedCopyCleanupFingerprint
 }
 
 public enum ImportedCopyCleanupFailure: Error, Equatable, Sendable {
@@ -305,7 +298,7 @@ extension FileAccessConnectorError: LocalizedError {
         case let .selectedFileMetadataInspectionFailed(code):
             return "Selected File type could not be inspected (system code \(code)). Check Files access and try again."
         case let .inputTooLarge(actualByteCount, maximumByteCount):
-            return "Selected File is \(actualByteCount) bytes; PhonePad supports at most \(maximumByteCount) bytes."
+            return "Selected File is \(actualByteCount) bytes; MacPad Mobile supports at most \(maximumByteCount) bytes."
         case let .inputReadFailed(code):
             return "Selected File could not be read (system code \(code)). Check Files access and try again."
         case let .textDecodingFailed(error):
@@ -325,7 +318,7 @@ extension FileAccessConnectorError: LocalizedError {
         case .pendingBoundSaveBookmarkIsStale:
             return "Saved File access is stale. Locate the original File or use Save As before resolving its pending Save."
         case let .filePresenterNotRegistered(documentID):
-            return "File presentation for Document \(documentID.rawValue) is not active. Return PhonePad to the foreground and try again."
+            return "File presentation for Document \(documentID.rawValue) is not active. Return MacPad Mobile to the foreground and try again."
         case let .duplicateFilePresenterRegistration(documentID):
             return "File presentation received Document \(documentID.rawValue) more than once. No presenter was registered for that Document."
         case let .providerConflictVersionCountInvalid(count):
@@ -379,18 +372,18 @@ extension FileAccessConnectorError: LocalizedError {
         case let .replacementReportedRelocatedItem(code, generation, preservedFileName):
             switch generation {
             case .original:
-                return "Safe File replacement reported system code \(code) after relocating the verified original File. PhonePad preserved it as \(preservedFileName.value) and retained the unsaved edit."
+                return "Safe File replacement reported system code \(code) after relocating the verified original File. MacPad Mobile preserved it as \(preservedFileName.value) and retained the unsaved edit."
             case .intended:
-                return "Safe File replacement reported system code \(code) after relocating the verified intended output. PhonePad preserved it as \(preservedFileName.value) and retained the unsaved edit."
+                return "Safe File replacement reported system code \(code) after relocating the verified intended output. MacPad Mobile preserved it as \(preservedFileName.value) and retained the unsaved edit."
             case .unexpected:
-                return "Safe File replacement reported system code \(code) after relocating an unexpected File version. PhonePad preserved it as \(preservedFileName.value) and retained the unsaved edit."
+                return "Safe File replacement reported system code \(code) after relocating an unexpected File version. MacPad Mobile preserved it as \(preservedFileName.value) and retained the unsaved edit."
             }
         case let .replacementReportedItemPreservationFailed(
             replacementCode,
             preservationCode,
             generation
         ):
-            return "Safe File replacement reported system code \(replacementCode), and its temporary \(generation.description) item could not be made durable (system code \(preservationCode)). PhonePad retained the unsaved edit; check Files before retrying."
+            return "Safe File replacement reported system code \(replacementCode), and its temporary \(generation.description) item could not be made durable (system code \(preservationCode)). MacPad Mobile retained the unsaved edit; check Files before retrying."
         case .postWriteOutcomeIndeterminate:
             return "File changed during post-Save verification. Check the File before resolving the preserved edit."
         case let .replacementStagingCleanupFailed(code, precedingError):
@@ -407,9 +400,9 @@ private extension FileConflict {
     var description: String {
         switch self {
         case .contentChanged:
-            return "Original File content changed outside PhonePad. It was not overwritten; resolve the File Conflict explicitly."
+            return "Original File content changed outside MacPad Mobile. It was not overwritten; resolve the File Conflict explicitly."
         case .stableIdentityChanged:
-            return "Original File identity changed outside PhonePad. It was not overwritten; locate the original or use Save As."
+            return "Original File identity changed outside MacPad Mobile. It was not overwritten; locate the original or use Save As."
         case .ambiguousLocatorChange:
             return "Original File moved without a stable provider identity. It was not overwritten; locate the original or use Save As."
         case let .unresolvedProviderVersions(count):
@@ -479,11 +472,53 @@ public actor FileAccessConnector {
     typealias UnresolvedVersionCountReader = @Sendable (URL) -> Int
     typealias FileWritabilityReader = @Sendable (URL) throws -> Bool?
     typealias ImportedCopyRemover = @Sendable (URL, FileManager) throws -> Void
-    typealias ImportedCopyCleanupJournalMetadataVerifier = @Sendable (
-        URL,
-        ImportedCopyCleanupJournalItemKind,
-        FileManager
-    ) throws -> Void
+    typealias ImportedCopyCleanupJournalMetadataVerifier =
+        ImportedCopyCleanupMetadataVerifier
+
+    private struct Dependencies {
+        let fileManager: FileManager
+        var bookmarkCreator: BookmarkCreator
+        var bookmarkResolver: BookmarkResolver
+        var identityReader: FileIdentityReader
+        var replacer: FileReplacer
+        var saveAsStagingWriter: SaveAsStagingWriter
+        var saveAsStagingCleaner: SaveAsStagingCleaner
+        var saveAsRecoveryAccessorSourceProvider:
+            SaveAsRecoveryAccessorSourceProvider
+        var unresolvedVersionCountReader: UnresolvedVersionCountReader
+        var fileWritabilityReader: FileWritabilityReader
+        var applicationInboxURL: URL?
+        var importedCopyCleanupJournalRootURL: URL
+        var importedCopyRemover: ImportedCopyRemover
+        var importedCopyCleanupJournalMetadataVerifier:
+            ImportedCopyCleanupJournalMetadataVerifier
+
+        static func production(
+            fileManager: FileManager
+        ) -> Dependencies {
+            Dependencies(
+                fileManager: fileManager,
+                bookmarkCreator: createBookmarkData,
+                bookmarkResolver: resolveBookmark,
+                identityReader: readPersistentFileIdentity,
+                replacer: replaceFileSafely,
+                saveAsStagingWriter: writeSaveAsStagingData,
+                saveAsStagingCleaner: cleanSaveAsStaging,
+                saveAsRecoveryAccessorSourceProvider:
+                    retainSaveAsRecoveryAccessorSourceURL,
+                unresolvedVersionCountReader: readUnresolvedVersionCount,
+                fileWritabilityReader: readFileWritability,
+                applicationInboxURL: defaultApplicationInboxURL(
+                    fileManager: fileManager
+                ),
+                importedCopyCleanupJournalRootURL:
+                    defaultImportedCopyCleanupJournalRootURL(),
+                importedCopyRemover: removeImportedCopy,
+                importedCopyCleanupJournalMetadataVerifier:
+                    verifyImportedCopyCleanupJournalMetadata
+            )
+        }
+    }
 
     private let fileManager: FileManager
     private let bookmarkCreator: BookmarkCreator
@@ -508,54 +543,16 @@ public actor FileAccessConnector {
     ]
 
     public init(fileManager: FileManager) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = createBookmarkData
-        self.bookmarkResolver = resolveBookmark
-        self.identityReader = readPersistentFileIdentity
-        self.replacer = replaceFileSafely
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = readFileWritability
-        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
-        self.importedCopyCleanupJournalRootURL =
-            defaultImportedCopyCleanupJournalRootURL()
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        self.init(dependencies: .production(fileManager: fileManager))
     }
 
     init(
         fileManager: FileManager,
         bookmarkCreator: @escaping BookmarkCreator
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = resolveBookmark
-        self.identityReader = readPersistentFileIdentity
-        self.replacer = replaceFileSafely
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = readFileWritability
-        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
-        self.importedCopyCleanupJournalRootURL =
-            defaultImportedCopyCleanupJournalRootURL()
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        self.init(dependencies: dependencies)
     }
 
     init(
@@ -565,27 +562,12 @@ public actor FileAccessConnector {
         identityReader: @escaping FileIdentityReader,
         replacer: @escaping FileReplacer
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = bookmarkResolver
-        self.identityReader = identityReader
-        self.replacer = replacer
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = readFileWritability
-        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
-        self.importedCopyCleanupJournalRootURL =
-            defaultImportedCopyCleanupJournalRootURL()
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        dependencies.bookmarkResolver = bookmarkResolver
+        dependencies.identityReader = identityReader
+        dependencies.replacer = replacer
+        self.init(dependencies: dependencies)
     }
 
     init(
@@ -596,27 +578,14 @@ public actor FileAccessConnector {
         replacer: @escaping FileReplacer,
         saveAsRecoveryAccessorSourceProvider: @escaping SaveAsRecoveryAccessorSourceProvider
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = bookmarkResolver
-        self.identityReader = identityReader
-        self.replacer = replacer
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider = saveAsRecoveryAccessorSourceProvider
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = readFileWritability
-        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
-        self.importedCopyCleanupJournalRootURL =
-            defaultImportedCopyCleanupJournalRootURL()
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        dependencies.bookmarkResolver = bookmarkResolver
+        dependencies.identityReader = identityReader
+        dependencies.replacer = replacer
+        dependencies.saveAsRecoveryAccessorSourceProvider =
+            saveAsRecoveryAccessorSourceProvider
+        self.init(dependencies: dependencies)
     }
 
     init(
@@ -628,27 +597,16 @@ public actor FileAccessConnector {
         saveAsRecoveryAccessorSourceProvider: @escaping SaveAsRecoveryAccessorSourceProvider,
         unresolvedVersionCountReader: @escaping UnresolvedVersionCountReader
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = bookmarkResolver
-        self.identityReader = identityReader
-        self.replacer = replacer
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider = saveAsRecoveryAccessorSourceProvider
-        self.unresolvedVersionCountReader = unresolvedVersionCountReader
-        self.fileWritabilityReader = readFileWritability
-        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
-        self.importedCopyCleanupJournalRootURL =
-            defaultImportedCopyCleanupJournalRootURL()
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        dependencies.bookmarkResolver = bookmarkResolver
+        dependencies.identityReader = identityReader
+        dependencies.replacer = replacer
+        dependencies.saveAsRecoveryAccessorSourceProvider =
+            saveAsRecoveryAccessorSourceProvider
+        dependencies.unresolvedVersionCountReader =
+            unresolvedVersionCountReader
+        self.init(dependencies: dependencies)
     }
 
     init(
@@ -657,27 +615,11 @@ public actor FileAccessConnector {
         saveAsStagingWriter: @escaping SaveAsStagingWriter,
         saveAsStagingCleaner: @escaping SaveAsStagingCleaner
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = resolveBookmark
-        self.identityReader = readPersistentFileIdentity
-        self.replacer = replaceFileSafely
-        self.saveAsStagingWriter = saveAsStagingWriter
-        self.saveAsStagingCleaner = saveAsStagingCleaner
-        self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = readFileWritability
-        self.applicationInboxURL = defaultApplicationInboxURL(fileManager: fileManager)
-        self.importedCopyCleanupJournalRootURL =
-            defaultImportedCopyCleanupJournalRootURL()
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        dependencies.saveAsStagingWriter = saveAsStagingWriter
+        dependencies.saveAsStagingCleaner = saveAsStagingCleaner
+        self.init(dependencies: dependencies)
     }
 
     init(
@@ -689,30 +631,19 @@ public actor FileAccessConnector {
         fileWritabilityReader: @escaping FileWritabilityReader,
         applicationInboxURL: URL?
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = bookmarkResolver
-        self.identityReader = identityReader
-        self.replacer = replacer
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider = retainSaveAsRecoveryAccessorSourceURL
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = fileWritabilityReader
-        self.applicationInboxURL = applicationInboxURL
-        self.importedCopyCleanupJournalRootURL =
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        dependencies.bookmarkResolver = bookmarkResolver
+        dependencies.identityReader = identityReader
+        dependencies.replacer = replacer
+        dependencies.fileWritabilityReader = fileWritabilityReader
+        dependencies.applicationInboxURL = applicationInboxURL
+        dependencies.importedCopyCleanupJournalRootURL =
             injectedImportedCopyCleanupJournalRootURL(
                 applicationInboxURL: applicationInboxURL,
                 fileManager: fileManager
             )
-        self.importedCopyRemover = removeImportedCopy
-        self.importedCopyCleanupJournalMetadataVerifier =
-            verifyImportedCopyCleanupJournalMetadata
-        self.presentationChangeHints = presentationChanges.stream
-        self.presentationHintRelay = presentationChanges.relay
-        self.presentedFiles = [:]
-        self.importedCopyCleanupRecords = [:]
+        self.init(dependencies: dependencies)
     }
 
     init(
@@ -728,24 +659,41 @@ public actor FileAccessConnector {
         importedCopyCleanupJournalMetadataVerifier:
             @escaping ImportedCopyCleanupJournalMetadataVerifier
     ) {
-        let presentationChanges = makePresentationChangeStream()
-        self.fileManager = fileManager
-        self.bookmarkCreator = bookmarkCreator
-        self.bookmarkResolver = bookmarkResolver
-        self.identityReader = identityReader
-        self.replacer = replacer
-        self.saveAsStagingWriter = writeSaveAsStagingData
-        self.saveAsStagingCleaner = cleanSaveAsStaging
-        self.saveAsRecoveryAccessorSourceProvider =
-            retainSaveAsRecoveryAccessorSourceURL
-        self.unresolvedVersionCountReader = readUnresolvedVersionCount
-        self.fileWritabilityReader = fileWritabilityReader
-        self.applicationInboxURL = applicationInboxURL
-        self.importedCopyCleanupJournalRootURL =
+        var dependencies = Dependencies.production(fileManager: fileManager)
+        dependencies.bookmarkCreator = bookmarkCreator
+        dependencies.bookmarkResolver = bookmarkResolver
+        dependencies.identityReader = identityReader
+        dependencies.replacer = replacer
+        dependencies.fileWritabilityReader = fileWritabilityReader
+        dependencies.applicationInboxURL = applicationInboxURL
+        dependencies.importedCopyCleanupJournalRootURL =
             importedCopyCleanupJournalRootURL
-        self.importedCopyRemover = importedCopyRemover
-        self.importedCopyCleanupJournalMetadataVerifier =
+        dependencies.importedCopyRemover = importedCopyRemover
+        dependencies.importedCopyCleanupJournalMetadataVerifier =
             importedCopyCleanupJournalMetadataVerifier
+        self.init(dependencies: dependencies)
+    }
+
+    private init(dependencies: Dependencies) {
+        let presentationChanges = makePresentationChangeStream()
+        self.fileManager = dependencies.fileManager
+        self.bookmarkCreator = dependencies.bookmarkCreator
+        self.bookmarkResolver = dependencies.bookmarkResolver
+        self.identityReader = dependencies.identityReader
+        self.replacer = dependencies.replacer
+        self.saveAsStagingWriter = dependencies.saveAsStagingWriter
+        self.saveAsStagingCleaner = dependencies.saveAsStagingCleaner
+        self.saveAsRecoveryAccessorSourceProvider =
+            dependencies.saveAsRecoveryAccessorSourceProvider
+        self.unresolvedVersionCountReader =
+            dependencies.unresolvedVersionCountReader
+        self.fileWritabilityReader = dependencies.fileWritabilityReader
+        self.applicationInboxURL = dependencies.applicationInboxURL
+        self.importedCopyCleanupJournalRootURL =
+            dependencies.importedCopyCleanupJournalRootURL
+        self.importedCopyRemover = dependencies.importedCopyRemover
+        self.importedCopyCleanupJournalMetadataVerifier =
+            dependencies.importedCopyCleanupJournalMetadataVerifier
         self.presentationChangeHints = presentationChanges.stream
         self.presentationHintRelay = presentationChanges.relay
         self.presentedFiles = [:]
@@ -1391,7 +1339,6 @@ public actor FileAccessConnector {
             url: selectedURL,
             inboxURL: applicationInboxURL,
             documentID: DocumentID(rawValue: UUID()),
-            digest: nil,
             phase: .cleanupAuthorized,
             fileManager: inspectionFileManager
         )
@@ -1414,7 +1361,6 @@ public actor FileAccessConnector {
             url: selectedURL,
             inboxURL: applicationInboxURL,
             documentID: documentID,
-            digest: nil,
             phase: .cleanupAuthorized,
             fileManager: fileManager
         ), importedCopyCleanupCandidate(record) == candidate else {
@@ -1432,7 +1378,6 @@ public actor FileAccessConnector {
             url: selectedURL,
             inboxURL: applicationInboxURL,
             documentID: documentID,
-            digest: nil,
             phase: .cleanupAuthorized,
             fileManager: fileManager
         )
@@ -2852,15 +2797,16 @@ private func openTypedCoordinatedTextFile(
             digest: decodedFile.digest,
             providerConflictVersions: providerConflictVersions
         )
+        let ephemeralDetachedSnapshot = DetachedFileSnapshot(
+            candidate: candidate,
+            displayName: displayName,
+            text: decodedFile.text,
+            recoveryFileReference: nil
+        )
         if accessIntent == .copyRequired {
             return .success(
                 .detached(
-                    DetachedFileSnapshot(
-                        candidate: candidate,
-                        displayName: displayName,
-                        text: decodedFile.text,
-                        recoveryFileReference: nil
-                    ),
+                    ephemeralDetachedSnapshot,
                     .copyRequired
                 )
             )
@@ -2872,12 +2818,7 @@ private func openTypedCoordinatedTextFile(
         } catch {
             return .success(
                 .detached(
-                    DetachedFileSnapshot(
-                        candidate: candidate,
-                        displayName: displayName,
-                        text: decodedFile.text,
-                        recoveryFileReference: nil
-                    ),
+                    ephemeralDetachedSnapshot,
                     .bookmarkCreationFailed(code: (error as NSError).code)
                 )
             )
@@ -2888,12 +2829,7 @@ private func openTypedCoordinatedTextFile(
         } catch {
             return .success(
                 .detached(
-                    DetachedFileSnapshot(
-                        candidate: candidate,
-                        displayName: displayName,
-                        text: decodedFile.text,
-                        recoveryFileReference: nil
-                    ),
+                    ephemeralDetachedSnapshot,
                     .bookmarkResolutionFailed(code: (error as NSError).code)
                 )
             )
@@ -2901,12 +2837,7 @@ private func openTypedCoordinatedTextFile(
         guard !resolvedBookmark.isStale else {
             return .success(
                 .detached(
-                    DetachedFileSnapshot(
-                        candidate: candidate,
-                        displayName: displayName,
-                        text: decodedFile.text,
-                        recoveryFileReference: nil
-                    ),
+                    ephemeralDetachedSnapshot,
                     .bookmarkIsStale
                 )
             )
@@ -2921,24 +2852,14 @@ private func openTypedCoordinatedTextFile(
         case let .failure(reason):
             return .success(
                 .detached(
-                    DetachedFileSnapshot(
-                        candidate: candidate,
-                        displayName: displayName,
-                        text: decodedFile.text,
-                        recoveryFileReference: nil
-                    ),
+                    ephemeralDetachedSnapshot,
                     reason
                 )
             )
         case .success(false):
             return .success(
                 .detached(
-                    DetachedFileSnapshot(
-                        candidate: candidate,
-                        displayName: displayName,
-                        text: decodedFile.text,
-                        recoveryFileReference: nil
-                    ),
+                    ephemeralDetachedSnapshot,
                     .bookmarkResolvedToDifferentFile
                 )
             )
@@ -3104,7 +3025,6 @@ private func makeImportedCopyCleanupRecord(
     url: URL,
     inboxURL: URL?,
     documentID: DocumentID,
-    digest: FileDigest?,
     phase: ImportedCopyCleanupAuthorizationPhase,
     fileManager: FileManager
 ) throws(FileAccessConnectorError) -> ImportedCopyCleanupRecord? {
@@ -3146,15 +3066,16 @@ private func makeImportedCopyCleanupRecord(
         childName: childName,
         url: url.standardizedFileURL,
         inboxURL: canonicalInboxURL,
-        deviceID: status.st_dev,
-        inode: status.st_ino,
-        generation: status.st_gen,
-        byteCount: Int64(status.st_size),
-        modificationTimeSeconds: Int64(status.st_mtimespec.tv_sec),
-        modificationTimeNanoseconds: Int64(status.st_mtimespec.tv_nsec),
-        statusChangeTimeSeconds: Int64(status.st_ctimespec.tv_sec),
-        statusChangeTimeNanoseconds: Int64(status.st_ctimespec.tv_nsec),
-        digest: digest,
+        fingerprint: ImportedCopyCleanupFingerprint(
+            deviceID: Int64(status.st_dev),
+            inode: UInt64(status.st_ino),
+            generation: status.st_gen,
+            byteCount: Int64(status.st_size),
+            modificationTimeSeconds: Int64(status.st_mtimespec.tv_sec),
+            modificationTimeNanoseconds: Int64(status.st_mtimespec.tv_nsec),
+            statusChangeTimeSeconds: Int64(status.st_ctimespec.tv_sec),
+            statusChangeTimeNanoseconds: Int64(status.st_ctimespec.tv_nsec)
+        ),
         phase: phase
     )
 }
@@ -3168,15 +3089,7 @@ private func importedCopyCleanupRecord(
         childName: record.childName,
         url: record.url,
         inboxURL: record.inboxURL,
-        deviceID: record.deviceID,
-        inode: record.inode,
-        generation: record.generation,
-        byteCount: record.byteCount,
-        modificationTimeSeconds: record.modificationTimeSeconds,
-        modificationTimeNanoseconds: record.modificationTimeNanoseconds,
-        statusChangeTimeSeconds: record.statusChangeTimeSeconds,
-        statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds,
-        digest: record.digest,
+        fingerprint: record.fingerprint,
         phase: phase
     )
 }
@@ -3190,15 +3103,7 @@ private func importedCopyCleanupRecord(
         childName: record.childName,
         url: record.url,
         inboxURL: record.inboxURL,
-        deviceID: record.deviceID,
-        inode: record.inode,
-        generation: record.generation,
-        byteCount: record.byteCount,
-        modificationTimeSeconds: record.modificationTimeSeconds,
-        modificationTimeNanoseconds: record.modificationTimeNanoseconds,
-        statusChangeTimeSeconds: record.statusChangeTimeSeconds,
-        statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds,
-        digest: record.digest,
+        fingerprint: record.fingerprint,
         phase: record.phase
     )
 }
@@ -3208,14 +3113,7 @@ private func importedCopyCleanupCandidate(
 ) -> ImportedCopyCleanupCandidate {
     ImportedCopyCleanupCandidate(
         childName: record.childName,
-        deviceID: Int64(record.deviceID),
-        inode: UInt64(record.inode),
-        generation: record.generation,
-        byteCount: record.byteCount,
-        modificationTimeSeconds: record.modificationTimeSeconds,
-        modificationTimeNanoseconds: record.modificationTimeNanoseconds,
-        statusChangeTimeSeconds: record.statusChangeTimeSeconds,
-        statusChangeTimeNanoseconds: record.statusChangeTimeNanoseconds
+        fingerprint: record.fingerprint
     )
 }
 
@@ -3305,44 +3203,19 @@ private func verifyImportedCopy(
         return .failure(.verificationFailed(code: Int(errno)))
     }
     guard existingItemKind(mode: status.st_mode) == .regularFile,
-          status.st_dev == record.deviceID,
-          status.st_ino == record.inode,
-          status.st_gen == record.generation,
-          Int64(status.st_size) == record.byteCount,
+          Int64(status.st_dev) == record.fingerprint.deviceID,
+          UInt64(status.st_ino) == record.fingerprint.inode,
+          status.st_gen == record.fingerprint.generation,
+          Int64(status.st_size) == record.fingerprint.byteCount,
           Int64(status.st_mtimespec.tv_sec)
-              == record.modificationTimeSeconds,
+              == record.fingerprint.modificationTimeSeconds,
           Int64(status.st_mtimespec.tv_nsec)
-              == record.modificationTimeNanoseconds,
+              == record.fingerprint.modificationTimeNanoseconds,
           Int64(status.st_ctimespec.tv_sec)
-              == record.statusChangeTimeSeconds,
+              == record.fingerprint.statusChangeTimeSeconds,
           Int64(status.st_ctimespec.tv_nsec)
-              == record.statusChangeTimeNanoseconds else {
+              == record.fingerprint.statusChangeTimeNanoseconds else {
         return .changed
-    }
-    if let expectedDigest = record.digest {
-        let data: Data
-        switch readRegularFile(at: url, fileManager: fileManager) {
-        case let .success(value):
-            data = value
-        case .failure(.missing):
-            return .absent
-        case .failure(.itemIsNotRegularFile),
-             .failure(.tooLarge):
-            return .changed
-        case let .failure(.readFailed(code)):
-            return .failure(.verificationFailed(code: code))
-        }
-        let observedDigest: FileDigest
-        do {
-            observedDigest = try FileDigest(
-                bytes: Data(SHA256.hash(data: data))
-            )
-        } catch {
-            return .failure(.verificationFailed(code: Int(EIO)))
-        }
-        guard observedDigest == expectedDigest else {
-            return .changed
-        }
     }
     return .exact
 }
@@ -4830,7 +4703,7 @@ private func makeUnclaimedPreservedSaveAsDestination(
 ) throws -> (url: URL, fileName: ValidatedFileName) {
     for _ in 0..<16 {
         let fileName = try ValidatedFileName(
-            validating: "PhonePad Preserved \(UUID().uuidString)"
+            validating: "MacPad Mobile Preserved \(UUID().uuidString)"
         )
         let candidateURL = try makeDirectSaveAsTargetURL(
             directoryURL: directoryURL,
