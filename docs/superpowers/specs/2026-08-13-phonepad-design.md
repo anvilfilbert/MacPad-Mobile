@@ -283,9 +283,9 @@ Messages identify the operation and File display name where available, explain w
 
 ## Visual Identity and Apple Design
 
-PhonePad follows current Apple Human Interface Guidelines for navigation, touch targets, adaptive layout, typography, system materials, accessibility, and platform controls.
+MacPad Mobile follows current Apple Human Interface Guidelines for navigation, touch targets, adaptive layout, typography, system materials, accessibility, and platform controls.
 
-The app icon is a new sibling of MacPad's logo, not a copy: it retains the dark dimensional background, white document form, blue writing accent, and overall visual language while replacing the identifying `M` with a `P`. The source MacPad visual reference has SHA-256 `b572225699c060beb2589b9dad3590b221cd3e45736aa6e51b03f0fa531a6a75`. PhonePad supplies Apple-compliant 1024×1024 source artwork and appropriate default, dark, and tinted appearances without pre-masking rounded corners.
+The app icon uses MacPad's document-and-pen `M` mark with a compact `MOBILE` badge in the established cyan-blue accent. The source MacPad visual reference has SHA-256 `b572225699c060beb2589b9dad3590b221cd3e45736aa6e51b03f0fa531a6a75`. MacPad Mobile supplies Apple-compliant 1024×1024 source artwork and appropriate default, dark, and tinted appearances without pre-masking rounded corners.
 
 The interface adapts to orientation, iPad Split View width, system appearance, Dynamic Type, VoiceOver, Reduce Motion, hardware keyboard, and pointer input. At standard content sizes the Tab Strip remains 44 points high; at accessibility content sizes it grows only as needed to prevent clipping, while titles truncate before encroaching on Close targets. Toolbar and status content collapse into their documented compact forms before overlapping. Functional controls have stable accessibility identifiers and labels; color never carries unsaved, active, conflict, or recovery meaning alone.
 
