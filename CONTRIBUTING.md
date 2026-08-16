@@ -63,5 +63,11 @@ xcodebuild \
 
 ## Licensing
 
-No current repository license has been specified. Contribution and reuse terms
-remain blocked on a product owner-approved license or rights statement.
+Unless explicitly stated otherwise, contributions intentionally submitted for
+inclusion are licensed under the [Apache License 2.0](LICENSE), consistent with
+Section 5 of that license.
+
+Do not contribute third-party material without compatible redistribution
+rights. MacPad Mobile branding and artwork are excluded from Apache-2.0; do not
+modify or add branded assets unless their rights and intended license are
+documented in the pull request.
