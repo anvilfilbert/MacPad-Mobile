@@ -102,9 +102,12 @@ Build prerequisites, verification commands, and contribution expectations are
 in [CONTRIBUTING.md](CONTRIBUTING.md). Internal targets and source modules retain
 the `PhonePad` name.
 
-## License status
+## License
 
-No current repository license has been specified. Do not assume permission to
-use, copy, modify, or distribute the source or bundled artwork. A product
-owner-approved license or rights statement and an asset-rights review are still
-required.
+Source code, tests, build configuration, and documentation are licensed under
+the [Apache License 2.0](LICENSE), unless a file states otherwise.
+
+The license does not cover the MacPad Mobile name, logo, app icons,
+screenshots, social-preview artwork, or other branding and artwork. Those
+assets remain all rights reserved unless separately licensed. Apache-2.0 does
+not grant trademark rights.

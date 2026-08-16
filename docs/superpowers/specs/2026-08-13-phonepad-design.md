@@ -331,15 +331,15 @@ A build is TestFlight-upload-ready only after the user separately authorizes req
 - A Release archive for a generic iOS device is prepared using Xcode's `TestFlight & App Store` distribution route and can be validated or exported without developer-only entitlements.
 - The user explicitly authorizes Xcode's Apple-connected Validate App operation, including any artifact transmission it requires, and validation completes without errors. This remains preflight and does not claim App Store Connect processing or TestFlight eligibility.
 - Tracked source, assets, and configuration contain no MacPad source/tests, secrets, personal names or email addresses, signing team identifiers, device UDIDs, certificates, provisioning profiles, or absolute home-directory paths.
-- No `LICENSE` file or package license declaration exists until the separate publication-and-license decision is made.
+- The repository license and customer documentation accurately distinguish Apache-2.0 source terms from excluded MacPad Mobile branding and artwork.
 
 Developer Portal Bundle ID creation, signing-profile creation, Apple-connected validation, App Store Connect record creation, archive upload, TestFlight submission, and tester distribution are external actions and require explicit approval before each applicable stage. On an approved upload, `TestFlight & App Store` distribution must be selected rather than Internal Only. The Build becomes TestFlight-ready only after App Store Connect reports processing complete.
 
 ## Repository Boundary
 
-All PhonePad code, tests, assets, and release configuration live in the independent private `anvilfilbert/PhonePad` repository. MacPad is an observable behavior and visual reference only. PhonePad does not modify MacPad or depend on its repository, package, build, release, GPL-covered source, or tests.
+All PhonePad code, tests, assets, and release configuration live in the independent public `anvilfilbert/MacPad-Mobile` repository. MacPad is an observable behavior and visual reference only. PhonePad does not modify MacPad or depend on its repository, package, build, release, GPL-covered source, or tests.
 
-Whether PhonePad later becomes public and which license it adopts remain intentionally outside this design. Publication requires a separate decision and review before any repository visibility or license change.
+The repository is public. Source code, tests, build configuration, and documentation use Apache License 2.0; MacPad Mobile branding and artwork are excluded and remain all rights reserved unless separately licensed.
 
 ## Decision References
 
