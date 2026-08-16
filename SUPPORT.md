@@ -15,8 +15,8 @@ Check these safety points first:
 
 ## Public support routes
 
-- [Report a reproducible bug](/anvilfilbert/PhonePad/issues/new?template=bug-report.yml)
-- [Request customer support](/anvilfilbert/PhonePad/issues/new?template=support-request.yml)
+- [Report a reproducible bug](/anvilfilbert/MacPad-Mobile/issues/new?template=bug-report.yml)
+- [Request customer support](/anvilfilbert/MacPad-Mobile/issues/new?template=support-request.yml)
 
 Include the iPhone or iPad model, iOS or iPadOS version, and a short sequence of
 steps. If the problem involves a File provider, name the provider and say

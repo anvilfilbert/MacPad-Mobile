@@ -5,13 +5,12 @@
 Do not disclose vulnerability details in a public GitHub issue, discussion, or
 pull request.
 
-A verified private security-reporting destination has not yet been configured.
-The product owner must enable GitHub private vulnerability reporting or approve
-another private contact before accepting reports. Until that route exists,
-retain the details and do not publish them in this repository.
+Use [GitHub private vulnerability reporting](https://github.com/anvilfilbert/MacPad-Mobile/security/advisories/new)
+to send vulnerability details privately to repository maintainers. Do not use
+that route for ordinary support or product bugs.
 
 Ordinary product bugs that contain no sensitive information can use the
-[bug-report form](/anvilfilbert/PhonePad/issues/new?template=bug-report.yml).
+[bug-report form](/anvilfilbert/MacPad-Mobile/issues/new?template=bug-report.yml).
 
 ## Scope information
 

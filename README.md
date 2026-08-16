@@ -88,8 +88,8 @@ remain controlled by Apple and the services you configure.
 
 ## Help and feedback
 
-- [Report a reproducible bug](/anvilfilbert/PhonePad/issues/new?template=bug-report.yml)
-- [Request customer support](/anvilfilbert/PhonePad/issues/new?template=support-request.yml)
+- [Report a reproducible bug](/anvilfilbert/MacPad-Mobile/issues/new?template=bug-report.yml)
+- [Request customer support](/anvilfilbert/MacPad-Mobile/issues/new?template=support-request.yml)
 - Read [support guidance](SUPPORT.md) before including logs or screenshots.
 - Read [security guidance](SECURITY.md) before reporting a vulnerability.
 
