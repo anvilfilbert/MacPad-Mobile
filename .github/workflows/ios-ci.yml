@@ -16,6 +16,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  documentation:
+    name: Generate Swift documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Generate PhonePadCore documentation
+        uses: SwiftDocOrg/swift-doc@f935ebfe524a0ff27bda07dadc3662e3e45b5125 # 1.0.0-rc.1
+        with:
+          inputs: PhonePadCore
+          module-name: PhonePadCore
+          minimum-access-level: internal
+          output: .build/swift-doc/PhonePadCore
+
+      - name: Generate application documentation
+        uses: SwiftDocOrg/swift-doc@f935ebfe524a0ff27bda07dadc3662e3e45b5125 # 1.0.0-rc.1
+        with:
+          inputs: PhonePad
+          module-name: PhonePad
+          minimum-access-level: internal
+          output: .build/swift-doc/PhonePad
+
+      - name: Upload generated documentation
+        uses: actions/upload-artifact@v6
+        with:
+          name: swift-documentation-${{ github.run_id }}
+          path: .build/swift-doc
+          if-no-files-found: error
+          retention-days: 7
+
   build-and-test:
     name: Release build and unit tests
     runs-on: macos-26
