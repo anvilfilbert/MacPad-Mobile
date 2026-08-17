@@ -65,6 +65,42 @@ final class PhonePadLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testAboutSheetShowsIdentityVersionAndPublicRepository() {
+        let app = launchPhonePad()
+
+        let actionMenu = app.descendants(matching: .any)[
+            "phonepad.action-menu"
+        ].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.tap()
+
+        let about = app.buttons["phonepad.action-menu.about"]
+        XCTAssertTrue(about.waitForExistence(timeout: 2))
+        about.tap()
+
+        let sheet = app.descendants(matching: .any)[
+            "phonepad.about.sheet"
+        ].firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            sheet.staticTexts["phonepad.about.app-name"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            sheet.staticTexts["phonepad.about.version"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            sheet.buttons["phonepad.about.creator"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            sheet.buttons["phonepad.about.repository"]
+                .waitForExistence(timeout: 2)
+        )
+    }
+
+    @MainActor
     func testExternalOpenHostPublishesRealFileFixtures() throws {
         let host = launchExternalOpenHost()
 
