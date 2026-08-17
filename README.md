@@ -14,6 +14,7 @@ MacPad Mobile requires iOS 18 or iPadOS 18 or later.
 
 ## MacPad family
 
+- [MacPad family website](https://anvilfilbert.github.io/) presents both apps.
 - [MacPad](https://github.com/anvilfilbert/MacPad) is the native macOS editor.
 - MacPad Mobile is the native iPhone and iPad editor in this repository.
 
