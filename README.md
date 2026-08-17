@@ -12,6 +12,53 @@ MacPad Mobile requires iOS 18 or iPadOS 18 or later.
 > Store, TestFlight, or downloadable release. Do not treat source availability
 > as an installable customer release.
 
+## MacPad family
+
+- [MacPad](https://github.com/anvilfilbert/MacPad) is the native macOS editor.
+- MacPad Mobile is the native iPhone and iPad editor in this repository.
+
+The apps are separate codebases and do not automatically synchronize open
+Documents, Tabs, settings, or recovery data. Files stored in a shared Apple
+Files location can be opened explicitly from either app.
+
+## Install locally with Xcode
+
+This creates a development installation for your own iPhone or iPad. It is not
+an App Store or TestFlight release.
+
+You need:
+
+- A Mac with Git and a version of Xcode that supports your device's OS.
+- An iPhone or iPad running iOS 18 or iPadOS 18 or later.
+- An Apple Account added under **Xcode > Settings > Apple Accounts**. A free
+  Personal Team is sufficient for local device testing.
+
+Install the app:
+
+1. Clone this repository and open the Xcode project:
+
+   ```sh
+   git clone https://github.com/anvilfilbert/MacPad-Mobile.git
+   cd MacPad-Mobile
+   open PhonePad.xcodeproj
+   ```
+
+2. Connect and unlock the device, trust the Mac when prompted, and enable
+   Developer Mode on the device if Xcode requests it.
+3. In Xcode, select the `PhonePad` app target, open **Signing & Capabilities**,
+   keep **Automatically manage signing** enabled, and choose your Personal
+   Team. Apply the same team to `PhonePadCore` only if Xcode reports a signing
+   error for that target.
+4. Choose the connected device as the run destination and press **Run**.
+5. If the first launch is blocked as an untrusted developer, open
+   **Settings > General > VPN & Device Management** on the device, trust the
+   developer app profile, and press **Run** again.
+
+Personal Team installations are temporary and must be rebuilt when their
+provisioning profile expires. TestFlight distribution requires membership in
+the Apple Developer Program. Never commit signing team IDs, certificates,
+provisioning profiles, or personal account details.
+
 ## Screenshots
 
 | iPhone | iPad |
