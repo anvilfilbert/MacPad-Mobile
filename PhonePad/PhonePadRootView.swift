@@ -78,6 +78,7 @@ struct PhonePadRootView: View {
     @State private var editorToolError: String?
     @State private var printError: String?
     @State private var printInProgress: Bool
+    @State private var aboutIsPresented: Bool
     @State private var privacyIsPresented: Bool
     @State private var goToLineIsPresented: Bool
     @State private var goToLineValue: String
@@ -108,6 +109,7 @@ struct PhonePadRootView: View {
         editorToolError = nil
         printError = nil
         printInProgress = false
+        aboutIsPresented = false
         privacyIsPresented = false
         goToLineIsPresented = false
         goToLineValue = ""
@@ -317,6 +319,15 @@ struct PhonePadRootView: View {
         .sheet(isPresented: $privacyIsPresented) {
             PhonePadPrivacySheet {
                 privacyIsPresented = false
+            }
+        }
+        .sheet(isPresented: $aboutIsPresented) {
+            PhonePadAboutSheet(
+                information: makePhonePadAboutInformation(
+                    bundle: .main
+                )
+            ) {
+                aboutIsPresented = false
             }
         }
         .task {
@@ -717,6 +728,13 @@ struct PhonePadRootView: View {
                 Label("Privacy", systemImage: "hand.raised")
             }
             .accessibilityIdentifier("phonepad.action-menu.privacy")
+
+            Button {
+                aboutIsPresented = true
+            } label: {
+                Label("About MacPad Mobile", systemImage: "info.circle")
+            }
+            .accessibilityIdentifier("phonepad.action-menu.about")
 
         } label: {
             HStack(spacing: 4) {
