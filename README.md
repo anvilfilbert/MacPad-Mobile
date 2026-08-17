@@ -2,7 +2,7 @@
 
 <img src="PhonePad/Assets.xcassets/AppIcon.appiconset/AppIcon-Default.png" alt="Current MacPad Mobile app icon: MacPad's white document and blue pen mark with a blue Mobile badge on a dark background" width="128">
 
-MacPad Mobile is a native plain-text editor for iPhone and iPad. It keeps
+Ultra-fast native plain-text editor for iPhone and iPad. No bloat. It keeps
 multiple Documents open in Tabs and works with Files chosen through Apple's
 Files interface.
 
@@ -14,6 +14,7 @@ MacPad Mobile requires iOS 18 or iPadOS 18 or later.
 
 ## MacPad family
 
+- [MacPad family website](https://anvilfilbert.github.io/) presents both apps.
 - [MacPad](https://github.com/anvilfilbert/MacPad) is the native macOS editor.
 - MacPad Mobile is the native iPhone and iPad editor in this repository.
 
